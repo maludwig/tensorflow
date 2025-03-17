@@ -74,6 +74,10 @@ CUDA_REDIST_JSON_DICT = {
         "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_12.8.0.json",
         "daa0d766b36feaa933592162c27be5fb63b68fc547ca6886c160a35d96ee8891",
     ],
+    "12.8.1": [
+        "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_12.8.1.json",
+        "249e28a83008d711d5f72880541c8be6253f6d61608461de4fcb715554a6cf17",
+    ],
 }
 
 CUDNN_REDIST_JSON_DICT = {
@@ -141,14 +145,14 @@ CUDNN_REDIST_JSON_DICT = {
 
 CUDA_12_NCCL_WHEEL_DICT = {
     "x86_64-unknown-linux-gnu": {
-        "version": "2.25.1",
-        "url": "https://files.pythonhosted.org/packages/11/0c/8c78b7603f4e685624a3ea944940f1e75f36d71bd6504330511f4a0e1557/nvidia_nccl_cu12-2.25.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "version": "2.26.2",
+        "url": "https://files.pythonhosted.org/packages/67/ca/f42388aed0fddd64ade7493dbba36e1f534d4e6fdbdd355c6a90030ae028/nvidia_nccl_cu12-2.26.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
         "sha256": "362aed5963fb9ea2ed2f264409baae30143498fd0e5c503aeaa1badd88cdc54a",
     },
     "aarch64-unknown-linux-gnu": {
-        "version": "2.25.1",
-        "url": "https://files.pythonhosted.org/packages/4b/28/f62adab24f2d4b2165b22145af56a7598ab535feb6ccd172f76b9106ebaa/nvidia_nccl_cu12-2.25.1-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
-        "sha256": "4ab428bc915785cc66e8c57cb34c7a64cf739c46702b8db748b6ad6cc7180cf8",
+        "version": "2.26.2",
+        "url": "https://files.pythonhosted.org/packages/69/5b/ca2f213f637305633814ae8c36b153220e40a07ea001966dcd87391f3acb/nvidia_nccl_cu12-2.26.2-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
+        "sha256": "5c196e95e832ad30fbbb50381eb3cbd1fadd5675e587a548563993609af19522",
     },
 }
 
@@ -176,6 +180,7 @@ CUDA_NCCL_WHEELS = {
     "12.6.2": CUDA_12_NCCL_WHEEL_DICT,
     "12.6.3": CUDA_12_NCCL_WHEEL_DICT,
     "12.8.0": CUDA_12_NCCL_WHEEL_DICT,
+    "12.8.1": CUDA_12_NCCL_WHEEL_DICT,
 }
 
 # Ensures PTX version compatibility w/ Clang & ptxas in cuda_configure.bzl
