@@ -12,21 +12,20 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include "xla/service/gpu/gpu_fusible.h"
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/parser/hlo_parser.h"
-#include "xla/service/hlo_runner.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/service/instruction_fusion.h"
-#include "xla/service/platform_util.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/tests/hlo_runner_agnostic_test_base.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 
@@ -37,19 +36,19 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::UnorderedElementsAre;
 
-auto MakeDeviceDescription() {
-  stream_executor::DeviceDescription device_description{
-      stream_executor::GpuDeviceInfoProto{}};
+absl::StatusOr<se::DeviceDescription> MakeDeviceDescription() {
+  TF_ASSIGN_OR_RETURN(stream_executor::DeviceDescription device_description,
+                      stream_executor::DeviceDescription::FromProto(
+                          stream_executor::GpuDeviceInfoProto{}));
   device_description.set_threads_per_warp(32);
   return device_description;
 }
 
-class GpuFusibleTest : public HloRunnerAgnosticTestBase {
+class GpuFusibleTest : public HloHardwareIndependentTestBase {
  public:
-  GpuFusibleTest()
-      : HloRunnerAgnosticTestBase(std::make_unique<HloRunner>(
-            PlatformUtil::GetDefaultPlatform().value())),
-        device_description_(MakeDeviceDescription()) {}
+  void SetUp() override {
+    TF_ASSERT_OK_AND_ASSIGN(device_description_, MakeDeviceDescription());
+  }
 
   bool IsReduceInputFusion(const HloInstruction& instr) const {
     return ::xla::gpu::IsReduceInputFusion(instr, device_description_);
@@ -87,7 +86,7 @@ class GpuFusibleTest : public HloRunnerAgnosticTestBase {
   }
 
  private:
-  const se::DeviceDescription device_description_;
+  se::DeviceDescription device_description_;
 };
 
 const char kModulePrefix[] = R"(
@@ -1282,6 +1281,17 @@ TEST_F(GpuFusibleTest, ProducerConsumerFusionInPlaceOperation) {
   EXPECT_TRUE(ShapesCompatibleForMultiOutputFusion(*dus, *transpose));
 }
 
+TEST_F(GpuFusibleTest, BitwidthChangingBitcastIsNotFusible) {
+  auto module = ParseAndReturnVerifiedModule(R"(
+e {
+  a = s32[7,2]{1,0} parameter(0)
+  b = s16[7]{0} bitcast(a)
+})")
+                    .value();
+  EXPECT_FALSE(IsProducerMultiOutputFusible(
+      *module->entry_computation()->root_instruction()));
+}
+
 TEST_F(GpuFusibleTest, ChooseFusionKind) {
   auto module = ParseAndReturnVerifiedModule(R"(
 HloModule module
@@ -1549,6 +1559,54 @@ TEST_F(GpuFusibleTest, GetSharedMemoryUsage) {
   FusionInfoCache cache(device_description());
   auto fusion = module->entry_computation()->root_instruction();
   EXPECT_EQ(cache.GetSharedMemoryUsage(*fusion), 32 * 33 * 2 * 4);
+}
+
+TEST_F(GpuFusibleTest, GetSharedMemoryUsageForPackedTranspose) {
+  auto module = ParseAndReturnVerifiedModule(absl::StrCat(kModulePrefix, R"(
+    wrapped_transpose {
+      p0 = s8[128,64,10,6] parameter(0)
+      ROOT transpose = s8[128,6,10,64] transpose(p0), dimensions={0,3,2,1}
+    }
+    ENTRY main {
+      p0 = s8[128,64,10,6] parameter(0)
+      ROOT res = s8[128,6,10,64] fusion(p0), kind=kInput, calls=wrapped_transpose
+    })"))
+                    .value();
+  FusionInfoCache cache(device_description());
+  auto fusion = module->entry_computation()->root_instruction();
+  EXPECT_EQ(cache.GetSharedMemoryUsage(*fusion), 32 * 32 * 4 * 4);
+}
+
+TEST_F(GpuFusibleTest, GetSharedMemoryUsageVariadicReduction) {
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(absl::StrCat(kModulePrefix, R"(
+        reducer {
+          p0 = pred[] parameter(0)
+          p1 = s32[] parameter(1)
+          p2 = pred[] parameter(2)
+          p3 = s32[] parameter(3)
+          ROOT %tuple.20.0 = (pred[], s32[]) tuple(p2, p3)
+        }
+        reduce {
+          p0 = pred[4,128,128] parameter(0)
+          p1 = s32[4,128,128] parameter(1)
+          cfalse = pred[] constant(false)
+          c0 = s32[] constant(0)
+          ROOT reduce = (pred[4,128], s32[4,128]) reduce(p0, p1, cfalse, c0),
+            dimensions={1}, to_apply=reducer
+        }
+        ENTRY main {
+          p0 = pred[4,128,128] parameter(0)
+          p1 = s32[4,128,128] parameter(1)
+          ROOT fusion = (pred[4,128], s32[4,128]) fusion(p0, p1),
+            kind=kInput, calls=reduce
+        })")));
+  FusionInfoCache cache(device_description());
+  auto fusion = module->entry_computation()->root_instruction();
+  constexpr int kMaxVectorSize = 4;
+  EXPECT_EQ(
+      cache.GetSharedMemoryUsage(*fusion),
+      (sizeof(int8_t) + sizeof(int32_t)) * 32 * (32 * kMaxVectorSize + 1));
 }
 
 TEST_F(GpuFusibleTest, IsConsumerTheOnlyNonRootUser) {

@@ -40,6 +40,7 @@ limitations under the License.
 #include "xla/backends/gpu/codegen/emitters/ir/xla_gpu_ops.h"
 #include "xla/backends/gpu/codegen/emitters/transforms/passes.h"
 #include "xla/codegen/emitters/ir/xla_ops.h"
+#include "xla/codegen/emitters/transforms/pass_pipelines.h"
 #include "xla/codegen/emitters/transforms/passes.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
@@ -63,15 +64,16 @@ int main(int argc, char** argv) {
   xla::gpu::registerGpuFusionTransformsPasses();
   xla::cpu::registerXlaCpuTransformsPasses();
   mlir::registerPassPipeline(
-      "xla-gpu-test-optimize",
+      "xla-test-optimize",
       "Test pipeline of passes up to inlining. No vectorization, also does not "
       "lower xla_gpu. Intended to simplify IR in tests.",
       [=](mlir::OpPassManager& pm, llvm::StringRef options,
           llvm::function_ref<mlir::LogicalResult(const llvm::Twine&)>
               errorHandler) {
-        if (!options.empty()) return mlir::failure();
-
-        xla::gpu::AddXlaGpuOpsOptimizationPasses(pm);
+        if (!options.empty()) {
+          return mlir::failure();
+        }
+        xla::emitters::RegisterOptimizationPasses(pm);
         return mlir::success();
       },
       [](llvm::function_ref<void(const mlir::detail::PassOptions&)>) {});
@@ -82,8 +84,25 @@ int main(int argc, char** argv) {
       [=](mlir::OpPassManager& pm, llvm::StringRef options,
           llvm::function_ref<mlir::LogicalResult(const llvm::Twine&)>
               errorHandler) {
-        if (!options.empty()) return mlir::failure();
+        if (!options.empty()) {
+          return mlir::failure();
+        }
         xla::gpu::AddLoopTransformationPasses(
+            pm, xla::gpu::TestGpuDeviceInfo::RTXA6000DeviceInfo());
+        return mlir::success();
+      },
+      [](llvm::function_ref<void(const mlir::detail::PassOptions&)>) {});
+  mlir::registerPassPipeline(
+      "xla-gpu-test-to-llvm",
+      "Test pipeline for the lowering to LLVM. Should run after "
+      "xla-gpu-test-to-transform-loops.",
+      [=](mlir::OpPassManager& pm, llvm::StringRef options,
+          llvm::function_ref<mlir::LogicalResult(const llvm::Twine&)>
+              errorHandler) {
+        if (!options.empty()) {
+          return mlir::failure();
+        }
+        xla::gpu::AddLoweringPasses(
             pm, xla::gpu::TestGpuDeviceInfo::RTXA6000DeviceInfo());
         return mlir::success();
       },

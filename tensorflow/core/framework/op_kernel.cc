@@ -27,6 +27,7 @@ limitations under the License.
 #include "absl/base/call_once.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/attr_value_util.h"
@@ -248,7 +249,7 @@ string OpKernel::TraceString(const OpKernelContext& ctx, bool verbose) const {
 }
 
 void AsyncOpKernel::Compute(OpKernelContext* context) {
-  Notification n;
+  absl::Notification n;
   ComputeAsync(context, [&n]() { n.Notify(); });
   n.WaitForNotification();
 }
@@ -825,7 +826,7 @@ absl::Status OpKernelContext::allocate_output(int index,
     }
   }
   tsl::profiler::ScopedMemoryDebugAnnotation op_annotation(
-      op_kernel().name_view().data(), step_id(), "output", type,
+      op_kernel().name_view(), step_id(), "output", type,
       [&shape]() { return shape.DebugString(); });
   auto output_tensor = std::make_unique<Tensor>();
   absl::Status s = allocate_tensor(type, shape, output_tensor.get(), attr);
@@ -856,7 +857,7 @@ absl::Status OpKernelContext::allocate_temp(
     allocator_attr.scope_id = -1;
   }
   tsl::profiler::ScopedMemoryDebugAnnotation op_annotation(
-      op_kernel().name_view().data(), step_id(), "temp", type,
+      op_kernel().name_view(), step_id(), "temp", type,
       [&shape]() { return shape.DebugString(); });
   absl::Status s =
       allocate_tensor(type, shape, out_temp, allocator_attr, allocation_attr);
@@ -964,7 +965,7 @@ bool OpKernelContext::maybe_set_output_by_allocate_and_copy(
             << params_->forward_from_array[index] << " alloc_attr.scope_id "
             << output_alloc_attr(index).scope_id;
     tsl::profiler::ScopedMemoryDebugAnnotation op_annotation(
-        op_kernel().name_view().data(), step_id(), "output", tensor.dtype(),
+        op_kernel().name_view(), step_id(), "output", tensor.dtype(),
         [&tensor]() { return tensor.shape().DebugString(); });
     auto new_tensor = std::make_unique<Tensor>();
     absl::Status s =
@@ -1178,8 +1179,7 @@ static const char kKernelLibPattern[] = "libtfkernel*.dylib";
 static const char kKernelLibPattern[] = "libtfkernel*.so";
 #endif
 
-#define FEATURE(x) \
-  { x, #x }
+#define FEATURE(x) {x, #x}
 
 // Returns Status::OK if the dynamic library at the given path is safe to
 // load with some level of confidence.

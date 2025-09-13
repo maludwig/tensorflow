@@ -35,8 +35,8 @@ cc_library(
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite:tf_to_tfl_flatbuffer",
         "//tensorflow/compiler/mlir/lite:types_proto_cc",
+        "//tensorflow/compiler/mlir/lite/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/compiler/mlir/lite/tools/optimize:reduced_precision_metadata",
-        "//tensorflow/compiler/mlir/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib",
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops",
         "//tensorflow/core:core_cpu_base",
@@ -63,7 +63,7 @@ cc_library(
         "//tensorflow/compiler/mlir/lite:converter_flags_proto_cc",
         "//tensorflow/compiler/mlir/lite:model_flags_proto_cc",
         "//tensorflow/compiler/mlir/lite:types_proto_cc",
-        "//tensorflow/compiler/mlir/quantization/common/quantization_lib:quantization_config",
+        "//tensorflow/compiler/mlir/lite/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_flags",
         "//tensorflow/compiler/mlir/tensorflow/translate/tools:parsers",
         "//tensorflow/compiler/mlir/tf2xla/api/v2:graph_to_tf_executor",
@@ -90,7 +90,7 @@ cc_library(
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite:tf_to_tfl_flatbuffer",
         "//tensorflow/compiler/mlir/lite:types_proto_cc",
-        "//tensorflow/compiler/mlir/quantization/common/quantization_lib:quantization_config",
+        "//tensorflow/compiler/mlir/lite/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib",
         "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_flags",
         "//tensorflow/core:lib",
@@ -117,7 +117,7 @@ cc_library(
         "//tensorflow/compiler/mlir/lite:model_flags_proto_cc",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite:types_proto_cc",
-        "//tensorflow/compiler/mlir/quantization/common/quantization_lib:quantization_config",
+        "//tensorflow/compiler/mlir/lite/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "@com_google_absl//absl/log",
@@ -163,7 +163,16 @@ py_strict_library(
         ":_pywrap_converter_api",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib_py",
         "//tensorflow/python:pywrap_tensorflow",
-    ],
+    ] + if_pywrap(
+        if_true = [] + select({
+            "//conditions:default": [],
+            # This reqirement is for LiteRT only as tensorflow/compiler/mlirt/lite is
+            # duplicated in LiteRT/tflite/converter.
+            "//tensorflow:disable_tf_lite_py": [
+                "//tensorflow/lite/python:pywrap_tflite",
+            ],
+        }),
+    ),
 )
 
 config_setting(
@@ -186,7 +195,7 @@ cc_library(
     hdrs = ["converter_python_api.h"],
     features = ["-parse_headers"],
     visibility = [
-        "//tensorflow/python:__subpackages__",
+        "//visibility:public",
     ],
     deps = [
         ":flatbuffer_to_mlir",
@@ -210,7 +219,6 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
-        "//third_party/python_runtime:headers",  # build_cleaner: keep; DNR: b/35864863
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -218,6 +226,7 @@ cc_library(
         "@com_google_protobuf//:protobuf",
         "@com_google_protobuf//:protobuf_headers",
         "@flatbuffers//:runtime_cc",
+        "@local_xla//third_party/python_runtime:headers",  # build_cleaner: keep; DNR: b/35864863
         "@local_xla//xla/tsl/platform:status",
     ] + select({
         # This is required when running `tflite_convert` from `bazel`.
@@ -240,13 +249,11 @@ tf_python_pybind_extension(
     pytype_srcs = [
         "_pywrap_converter_api.pyi",
     ],
-    visibility = [
-        "//tensorflow/python:__pkg__",
-    ],
+    visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib",
         "//tensorflow/python/lib/core:pybind11_lib",
-        "//third_party/python_runtime:headers",
+        "@local_xla//third_party/python_runtime:headers",
         "@pybind11",
     ] + if_pywrap([":converter_python_api"]),
 )

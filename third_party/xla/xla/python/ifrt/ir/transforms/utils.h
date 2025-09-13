@@ -16,16 +16,21 @@ limitations under the License.
 #ifndef XLA_PYTHON_IFRT_IR_TRANSFORMS_UTILS_H_
 #define XLA_PYTHON_IFRT_IR_TRANSFORMS_UTILS_H_
 
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Pass/Pass.h"
+#include "xla/pjrt/pjrt_executable.h"
 #include "xla/python/ifrt/dtype.h"
 #include "xla/python/ifrt/ir/ifrt_dialect.h"
 #include "xla/python/ifrt/ir/ifrt_ops.h"
@@ -67,6 +72,20 @@ mlir::ModuleOp CloneModuleUsingBuilder(mlir::ModuleOp module,
 // long format with an entry for each platform instance.
 absl::StatusOr<std::vector<std::string>> ExpandPlatformNames(
     const mlir::Pass::ListOption<std::string>& platform_names);
+
+// Returns a pretty string representation of the location.
+std::string GetPrettyLocation(mlir::Location loc);
+
+// Returns a fingerprint of the provided module.
+uint64_t MlirModuleFingerprint(mlir::ModuleOp module);
+
+// Extracts the XLA compile options overrides for the given atom program module.
+// Returns std::nullopt if no overrides are found.
+absl::StatusOr<std::optional<xla::CompileOptions>> GetModuleXlaCompileOverrides(
+    mlir::StringAttr compile_options_key,
+    std::shared_ptr<
+        absl::flat_hash_map<std::string, std::unique_ptr<CompileOptions>>>
+        compile_options_overrides);
 
 }  // namespace ifrt
 }  // namespace xla

@@ -1,5 +1,7 @@
 """Provides build configuration for TensorFlow."""
 
+load("@rules_cc//cc:cc_library.bzl", _cc_library = "cc_library")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("@rules_java//java:defs.bzl", "java_test")
 load(
     "//tensorflow:py.default.bzl",
@@ -21,7 +23,6 @@ load(
     "if_mkl",
     "if_mkl_ml",
     "if_mkldnn_aarch64_acl",
-    "if_mkldnn_aarch64_acl_openmp",
     "if_mkldnn_openmp",
     "onednn_v3_define",
 )
@@ -54,11 +55,11 @@ load(
     "cc_test",
 )
 load(
-    "//third_party/compute_library:build_defs.bzl",
+    "@local_xla//third_party/compute_library:build_defs.bzl",
     "if_enable_acl",
 )
 load(
-    "//third_party/llvm_openmp:openmp.bzl",
+    "@local_xla//third_party/llvm_openmp:openmp.bzl",
     "windows_llvm_openmp_linkopts",
 )
 load(
@@ -72,9 +73,12 @@ load(
     _cc_header_only_library = "cc_header_only_library",
     _custom_op_cc_header_only_library = "custom_op_cc_header_only_library",
     _if_cuda_or_rocm = "if_cuda_or_rocm",
-    _if_cuda_tools = "if_cuda_tools",
     _if_nccl = "if_nccl",
     _transitive_hdrs = "transitive_hdrs",
+)
+load(
+    "@local_xla//xla/tsl:tsl.default.bzl",
+    _if_cuda_tools = "if_cuda_tools",
 )
 load(
     "@local_config_tensorrt//:build_defs.bzl",
@@ -82,7 +86,7 @@ load(
     "if_tensorrt_exec",
 )
 load(
-    "@local_xla//third_party/py/rules_pywrap:pywrap.bzl",
+    "@local_xla//third_party/py/rules_pywrap:pywrap.default.bzl",
     "use_pywrap_rules",
     _pybind_extension = "pybind_extension",
     _stripped_cc_info = "stripped_cc_info",
@@ -216,22 +220,9 @@ def if_android_arm64(a):
         "//conditions:default": [],
     })
 
-def if_android_mips(a):
-    return select({
-        clean_dep("//tensorflow:android_mips"): a,
-        "//conditions:default": [],
-    })
-
 def if_not_android(a):
     return select({
         clean_dep("//tensorflow:android"): [],
-        "//conditions:default": a,
-    })
-
-def if_not_android_mips_and_mips64(a):
-    return select({
-        clean_dep("//tensorflow:android_mips"): [],
-        clean_dep("//tensorflow:android_mips64"): [],
         "//conditions:default": a,
     })
 
@@ -332,7 +323,6 @@ def if_not_fuchsia(a):
 def if_linux_x86_64(a):
     return select({
         clean_dep("//tensorflow:linux_x86_64"): a,
-        clean_dep("//tensorflow:haswell"): a,
         "//conditions:default": [],
     })
 
@@ -355,6 +345,7 @@ def if_libtpu(if_true, if_false = []):
     return select({
         # copybara:uncomment_begin(different config setting in OSS)
         # "//tools/cc_target_os:gce": if_true,
+        # "//buildenv/platforms/settings:chrome_linux": if_false,
         # copybara:uncomment_end_and_comment_begin
         clean_dep("//tensorflow:with_tpu_support"): if_true,
         # copybara:comment_end
@@ -477,7 +468,6 @@ def tf_copts(
         if_mkldnn_openmp(["-DENABLE_ONEDNN_OPENMP"]) +
         onednn_v3_define() +
         if_mkldnn_aarch64_acl(["-DDNNL_AARCH64_USE_ACL=1"]) +
-        if_mkldnn_aarch64_acl_openmp(["-DENABLE_ONEDNN_OPENMP"]) +
         if_zendnn(["-DAMD_ZENDNN"]) +
         if_enable_acl(["-DXLA_CPU_USE_ACL=1", "-fexceptions"]) +
         if_llvm_aarch32_available(["-DTF_LLVM_AARCH32_AVAILABLE=1"]) +
@@ -1603,7 +1593,7 @@ def tf_cc_test(
                 "-lpthread",
                 "-lm",
             ],
-            clean_dep("//third_party/compute_library:build_with_acl"): [
+            clean_dep("@local_xla//third_party/compute_library:build_with_acl"): [
                 "-fopenmp",
                 "-lm",
             ],
@@ -1646,7 +1636,7 @@ def tf_cc_shared_test(
                 "-lpthread",
                 "-lm",
             ],
-            clean_dep("//third_party/compute_library:build_with_acl"): [
+            clean_dep("@local_xla//third_party/compute_library:build_with_acl"): [
                 "-fopenmp",
                 "-lm",
             ],
@@ -2117,7 +2107,10 @@ def tf_kernel_library(
 
 register_extension_info(
     extension = tf_kernel_library,
-    label_regex_for_dep = "{extension_name}",
+    label_regex_map = {
+        "deps": "deps:{extension_name}",
+        "gpu_deps": "deps:{extension_name}_gpu",
+    },
 )
 
 def tf_mkl_kernel_library(
@@ -2230,6 +2223,8 @@ def tf_custom_op_library_additional_deps_impl():
         clean_dep("//tensorflow/core:reader_base"),
     ]
 
+CollectedDepsInfo = provider("CollectedDepsInfo", fields = ["tf_collected_deps"])
+
 # Traverse the dependency graph along the "deps" attribute of the
 # target and return a struct with one field called 'tf_collected_deps'.
 # tf_collected_deps will be the union of the deps of the current target
@@ -2245,9 +2240,9 @@ def _collect_deps_aspect_impl(target, ctx):
         all_deps += ctx.rule.attr.roots
     for dep in all_deps:
         direct.append(dep.label)
-        if hasattr(dep, "tf_collected_deps"):
-            transitive.append(dep.tf_collected_deps)
-    return struct(tf_collected_deps = depset(direct = direct, transitive = transitive))
+        if CollectedDepsInfo in dep:
+            transitive.append(dep[CollectedDepsInfo].tf_collected_deps)
+    return CollectedDepsInfo(tf_collected_deps = depset(direct = direct, transitive = transitive))
 
 collect_deps_aspect = aspect(
     attr_aspects = ["deps", "data", "roots"],
@@ -2266,9 +2261,9 @@ def _check_deps_impl(ctx):
     required_deps = ctx.attr.required_deps
     disallowed_deps = ctx.attr.disallowed_deps
     for input_dep in ctx.attr.deps:
-        if not hasattr(input_dep, "tf_collected_deps"):
+        if CollectedDepsInfo not in input_dep:
             continue
-        collected_deps = sets.make(input_dep.tf_collected_deps.to_list())
+        collected_deps = sets.make(input_dep[CollectedDepsInfo].tf_collected_deps.to_list())
         for disallowed_dep in disallowed_deps:
             if sets.contains(collected_deps, disallowed_dep.label):
                 fail(
@@ -2465,7 +2460,7 @@ def pywrap_tensorflow_macro_opensource(
     """Builds the pywrap_tensorflow_internal shared object."""
 
     if use_pywrap_rules():
-        native.py_library(
+        _plain_py_library(
             name = name,
             srcs = [],
             deps = [],
@@ -3103,8 +3098,7 @@ def pybind_library(
         **kwargs):
     # Mark common dependencies as required for build_cleaner.
     tags = tags + ["req_dep=" + clean_dep("//third_party/pybind11"), "req_dep=@local_config_python//:python_headers"]
-
-    native.cc_library(
+    _cc_library(
         name = name,
         copts = copts + ["-fexceptions"],
         features = features + [
@@ -3145,9 +3139,10 @@ def pybind_extension_opensource(
         testonly = None,
         visibility = None,
         win_def_file = None,
-        starlark_only = False):
+        starlark_only = False,
+        wrap_py_init = False):
     """Builds a generic Python extension module."""
-    _ignore = [enable_stub_generation, additional_stubgen_deps, module_name, starlark_only]  # buildifier: disable=unused-variable
+    _ignore = [enable_stub_generation, additional_stubgen_deps, module_name, starlark_only, wrap_py_init]  # buildifier: disable=unused-variable
     p = name.rfind("/")
     if p == -1:
         sname = name

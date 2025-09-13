@@ -49,7 +49,6 @@ cc_library(
     visibility = ["//visibility:private"],
     deps = [
         "//xla:bit_cast",
-        "//xla:executable_run_options",
         "//xla:fp_util",
         "//xla:literal",
         "//xla:literal_util",
@@ -59,11 +58,16 @@ cc_library(
         "//xla/client:executable_build_options",
         "//xla/hlo/builder:xla_builder",
         "//xla/hlo/builder:xla_computation",
-        "//xla/service:shaped_buffer",
-        "//xla/stream_executor:device_description",
-        "//xla/stream_executor:platform",
-        "//xla/tests:client_library_test_base",
+        "//xla/service:hlo_module_config",
+        "//xla/service:hlo_runner_interface",
+        "//xla/tests:client_library_test_runner_mixin",
+        "//xla/tests:hlo_pjrt_interpreter_reference_mixin",
+        "//xla/tests:hlo_pjrt_test_base",
+        "//xla/tests:xla_test_backend_predicates",
         "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:env",
+        "//xla/tsl/platform:statusor",
+        "//xla/tsl/platform:test",
         "//xla/tsl/util:command_line_flags",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/log",
@@ -73,10 +77,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
-        "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:path",
-        "@local_tsl//tsl/platform:statusor",
-        "@local_tsl//tsl/platform:test",
     ],
 )
 
@@ -97,7 +98,7 @@ cc_library(
     deps = [
         ":exhaustive_op_test_utils",
         "//xla/tsl/util:command_line_flags",
-        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_for_library",
         "@local_tsl//tsl/platform:logging",
         "@local_tsl//tsl/platform:test",
     ],
@@ -117,12 +118,12 @@ exhaustive_xla_test(
     backend_tags = {
         gpu: ["notsan"]
         for gpu in GPU_BACKENDS
-        if gpu != "gpu_any" and gpu != "gpu_amd_any"
+        if gpu != "nvgpu_any" and gpu != "amdgpu_any"
     },
     backends = ["cpu"] + [
         gpu
         for gpu in GPU_BACKENDS
-        if gpu != "gpu_any" and gpu != "gpu_amd_any"
+        if gpu != "nvgpu_any" and gpu != "amdgpu_any"
     ],
     # Partition goal is to get under ~5 minute execution time without needlessly
     # reserving hardware for each shard.
@@ -141,9 +142,9 @@ exhaustive_xla_test(
     shard_count = 50,
     tags = [
         "optonly",
-        "test_xla_cpu_no_thunks",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
+        "test_migrated_to_hlo_runner_pjrt",
     ],
     deps = [
         ":exhaustive_op_test_utils",
@@ -154,6 +155,7 @@ exhaustive_xla_test(
         "//xla/hlo/builder:xla_builder",
         "//xla/hlo/builder/lib:constants",
         "//xla/hlo/builder/lib:math",
+        "//xla/tests:xla_test_backend_predicates",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",
@@ -173,19 +175,19 @@ xla_test(
     backend_tags = {
         gpu: ["notsan"]
         for gpu in GPU_BACKENDS
-        if gpu != "gpu_any" and gpu != "gpu_amd_any"
+        if gpu != "nvgpu_any" and gpu != "amdgpu_any"
     },
     backends = ["cpu"] + [
         gpu
         for gpu in GPU_BACKENDS
-        if gpu != "gpu_any" and gpu != "gpu_amd_any"
+        if gpu != "nvgpu_any" and gpu != "amdgpu_any"
     ],
     shard_count = 50,
     tags = [
         "optonly",
-        "test_xla_cpu_no_thunks",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
+        "test_migrated_to_hlo_runner_pjrt",
     ],
     deps = [
         ":exhaustive_op_test_utils",
@@ -193,7 +195,6 @@ xla_test(
         "//xla:literal",
         "//xla:types",
         "//xla/hlo/builder:xla_builder",
-        "//xla/tests:test_macros_header",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/types:span",
         "@local_tsl//tsl/platform:test",
@@ -224,17 +225,17 @@ exhaustive_xla_test(
     backend_tags = {
         gpu: ["notsan"]
         for gpu in GPU_BACKENDS
-        if gpu != "gpu_any" and gpu != "gpu_amd_any"
+        if gpu != "nvgpu_any" and gpu != "amdgpu_any"
     },
     backends = ["cpu"] + [
         gpu
         for gpu in GPU_BACKENDS
-        if gpu != "gpu_any" and gpu != "gpu_amd_any"
+        if gpu != "nvgpu_any" and gpu != "amdgpu_any"
     ],
     # Partition goal is to get under ~5 minute execution time without needlessly
     # reserving hardware for each shard.
     #
-    # exhasutive_xla_test needs to have all partition names added to allow other
+    # exhaustive_xla_test needs to have all partition names added to allow other
     # build tools to function.
     partitions = {
         "f16_and_smaller": [
@@ -252,6 +253,7 @@ exhaustive_xla_test(
         "optonly",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
+        "test_migrated_to_hlo_runner_pjrt",
     ],
     deps = [
         ":exhaustive_binary_test_textual_hdrs",
@@ -260,6 +262,7 @@ exhaustive_xla_test(
         "//xla:literal",
         "//xla:types",
         "//xla/hlo/builder:xla_builder",
+        "//xla/tests:xla_test_backend_predicates",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",

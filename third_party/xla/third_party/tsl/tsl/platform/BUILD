@@ -83,26 +83,6 @@ tsl_cc_test(
 )
 
 cc_library(
-    name = "criticality",
-    compatible_with = get_compatible_with_portable(),
-    textual_hdrs = ["criticality.h"],
-    deps = tf_platform_deps("criticality"),
-)
-
-tsl_cc_test(
-    name = "criticality_test",
-    size = "small",
-    srcs = [
-        "criticality_test.cc",
-    ],
-    deps = [
-        ":criticality",
-        "@com_google_googletest//:gtest_main",
-        "@local_xla//xla/tsl/platform:test",
-    ],
-)
-
-cc_library(
     name = "denormal",
     srcs = ["denormal.cc"],
     hdrs = ["denormal.h"],
@@ -364,7 +344,6 @@ filegroup(
         "coding.h",
         "context.h",
         "cpu_info.h",
-        "criticality.h",
         "env.h",
         "errors.h",
         "file_statistics.h",
@@ -440,7 +419,6 @@ filegroup(
         "context.h",
         "cpu_info.cc",
         "cpu_info.h",
-        "criticality.h",
         "demangle.h",
         "denormal.cc",
         "denormal.h",
@@ -480,7 +458,6 @@ filegroup(
         "statusor.h",
         "str_util.cc",
         "str_util.h",
-        "strcat.cc",
         "strcat.h",
         "stringpiece.h",
         "stringprintf.cc",
@@ -550,7 +527,6 @@ exports_files(
         "context.h",
         "cpu_info.cc",
         "cpu_info.h",
-        "criticality.h",
         "cuda_root_path.h",
         "demangle.h",
         "env.h",
@@ -684,6 +660,7 @@ cc_library(
 filegroup(
     name = "xla_cpu_runtime_srcs",
     srcs = [
+        "context.h",
         "env_time.h",
         "macros.h",
         "platform.h",
@@ -716,7 +693,12 @@ cc_library(
         "numa.h",
         "snappy.h",
     ],
-    deps = tf_windows_aware_platform_deps("platform_port"),
+    deps = tf_windows_aware_platform_deps("platform_port") + [
+        ":platform",
+        "@local_xla//xla/tsl/platform:byte_order",
+        "@local_xla//xla/tsl/platform:dynamic_annotations",
+        "@local_xla//xla/tsl/platform:types",
+    ],
 )
 
 cc_library(
@@ -791,12 +773,13 @@ cc_library(
 
 cc_library(
     name = "strcat",
-    srcs = ["strcat.cc"],
     hdrs = ["strcat.h"],
     deps = [
         ":numbers",
         ":stringpiece",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/meta:type_traits",
+        "@com_google_absl//absl/strings",
         "@local_xla//xla/tsl/platform:logging",
         "@local_xla//xla/tsl/platform:macros",
         "@local_xla//xla/tsl/platform:types",
@@ -1139,6 +1122,7 @@ tsl_cc_test(
         ":platform",
         ":stringpiece",
         ":tstring",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
         "@local_xla//xla/tsl/platform:test",
     ],
@@ -1158,6 +1142,7 @@ cc_library(
     hdrs = ["notification.h"],
     compatible_with = get_compatible_with_portable(),
     deps = [
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
     ],
@@ -1226,6 +1211,7 @@ cc_library(
     deps = [
         ":mutex",
         ":thread_annotations",
+        "@com_google_absl//absl/base:nullability",
         "@local_xla//xla/tsl/platform:logging",
     ],
 )
@@ -1377,22 +1363,6 @@ tsl_cc_test(
         ":str_util",
         "@com_google_googletest//:gtest_main",
         "@local_xla//xla/tsl/platform:test",
-    ],
-)
-
-tsl_cc_test(
-    name = "strcat_test",
-    size = "small",
-    srcs = [
-        "strcat_test.cc",
-    ],
-    deps = [
-        ":strcat",
-        ":stringprintf",
-        "@com_google_absl//absl/strings",
-        "@com_google_googletest//:gtest_main",
-        "@local_xla//xla/tsl/platform:test",
-        "@local_xla//xla/tsl/platform:types",
     ],
 )
 

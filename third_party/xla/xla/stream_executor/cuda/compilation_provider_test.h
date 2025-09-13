@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/stream_executor/cuda/compilation_provider.h"
 
 namespace stream_executor::cuda {
@@ -32,6 +33,9 @@ inline constexpr absl::string_view kNvJitLinkCompilationProviderName =
 inline constexpr absl::string_view kNvptxcompilerCompilationProviderName =
     "nvptxcompiler";
 inline constexpr absl::string_view kDriverCompilationProviderName = "driver";
+inline constexpr absl::string_view
+    kCompositeNvptxCompilerAndNvJitLinkCompilationProviderName =
+        "composite_nvptxcompiler_and_nvjitlink";
 
 class CompilationProviderTest
     : public testing::TestWithParam<absl::string_view> {

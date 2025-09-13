@@ -47,8 +47,6 @@ limitations under the License.
 #include "xla/stream_executor/scratch_allocator.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/tsl/protobuf/dnn.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
 
 namespace Eigen {
 struct half;
@@ -196,6 +194,8 @@ class MatmulTensorDescriptor {
   DataType type() const { return tensor_.type(); }
 
   std::string ToString() const;
+
+  TensorDescriptor tensor() const { return tensor_; }
 
  protected:
   MatmulTensorDescriptor(TensorDescriptor tensor,
@@ -588,9 +588,6 @@ class ConvolutionDescriptor {
     return *this;
   }
 
-  // TODO(timshen): remove this function. No users of this class is setting a
-  // non-default pad alignment.
-  PadAlignment pad_alignment() const { return PadAlignment::kDefault; }
   int group_count() const { return proto_.group_count(); }
   int ndims() const { return padding().size(); }
   bool convolution_not_crosscorr() const {
@@ -737,7 +734,6 @@ class AlgorithmDesc {
       : AlgorithmDesc(algo_id, use_tensor_ops, std::nullopt) {}
   AlgorithmDesc(Index algo_id, bool use_tensor_ops,
                 std::optional<uint64_t> workspace_size) {
-    proto_.set_is_cudnn_frontend(false);
     proto_.set_algo_id(algo_id);
     proto_.set_math_type(use_tensor_ops ? AlgorithmProto::TENSOR_OP_MATH
                                         : AlgorithmProto::DEFAULT_MATH);
@@ -748,8 +744,6 @@ class AlgorithmDesc {
   AlgorithmDesc(int64_t engine_id,
                 const std::vector<std::pair<int64_t, int64_t>>& tuning_knobs,
                 std::optional<uint64_t> workspace_size);
-  bool is_cudnn_frontend() const { return proto_.is_cudnn_frontend(); }
-
   bool tensor_ops_enabled() const {
     return proto_.math_type() == AlgorithmProto::TENSOR_OP_MATH;
   }
@@ -1105,6 +1099,12 @@ class DnnGraph {
                                int64_t local_device_ordinal) const = 0;
   virtual void InitDropoutState(int64_t local_device_count, int64_t seed,
                                 int64_t increment) = 0;
+  virtual absl::StatusOr<bool> SupportsExplicitCommandBufferConstruction()
+      const = 0;
+  using RawCommandBufferHandle = void*;
+  virtual absl::Status PopulateOrUpdateRawCommandBuffer(
+      Stream&, absl::Span<DeviceMemoryBase> operands, RawCommandBufferHandle,
+      bool do_update) = 0;
 };
 
 using LazyDnnGraph = std::unique_ptr<DnnGraph>;
@@ -1485,11 +1485,11 @@ class DnnSupport {
   }
 
   virtual absl::Status GetConvolveRunners(
-      bool use_cudnn_frontend, ConvolutionKind kind, DataType input_type,
-      DataType output_type, Stream* stream,
-      const BatchDescriptor& input_descriptor, DeviceMemoryBase input_data,
-      const FilterDescriptor& filter_descriptor, DeviceMemoryBase filter_data,
-      const BatchDescriptor& output_descriptor, DeviceMemoryBase output_data,
+      ConvolutionKind kind, DataType input_type, DataType output_type,
+      Stream* stream, const BatchDescriptor& input_descriptor,
+      DeviceMemoryBase input_data, const FilterDescriptor& filter_descriptor,
+      DeviceMemoryBase filter_data, const BatchDescriptor& output_descriptor,
+      DeviceMemoryBase output_data,
       const ConvolutionDescriptor& convolution_descriptor, bool use_fallback,
       ScratchAllocator* scratch_allocator,
       const NumericOptions& numeric_options,
@@ -1525,9 +1525,9 @@ class DnnSupport {
       std::string serialized_graph);
 
   virtual absl::Status GetFusedConvolveRunners(
-      bool use_cudnn_frontend, ConvolutionKind kind, DataType element_type,
-      DataType bias_type, DataType output_type, double conv_input_scale,
-      double side_input_scale, double leakyrelu_alpha, Stream* stream,
+      ConvolutionKind kind, DataType element_type, DataType bias_type,
+      DataType output_type, double conv_input_scale, double side_input_scale,
+      double leakyrelu_alpha, Stream* stream,
       const BatchDescriptor& input_descriptor,
       const FilterDescriptor& filter_descriptor,
       const BatchDescriptor& bias_descriptor,
@@ -1537,9 +1537,9 @@ class DnnSupport {
       std::vector<std::unique_ptr<const FusedConvRunner>>* out_exec_plans);
 
   virtual absl::Status GetFusedMatmulRunners(
-      bool use_cudnn_frontend, DataType element_type, DataType bias_type,
-      DataType output_type, Stream* stream, bool trans_a, bool trans_b,
-      uint64_t m, uint64_t n, uint64_t k, int64_t lda, int64_t ldb, int64_t ldc,
+      DataType element_type, DataType bias_type, DataType output_type,
+      Stream* stream, bool trans_a, bool trans_b, uint64_t m, uint64_t n,
+      uint64_t k, int64_t lda, int64_t ldb, int64_t ldc,
       ActivationMode activation_mode, bool use_fallback,
       const NumericOptions& numeric_options,
       std::vector<std::unique_ptr<const FusedMatmulRunner>>* out_exec_plans);

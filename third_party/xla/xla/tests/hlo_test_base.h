@@ -16,11 +16,25 @@ limitations under the License.
 #ifndef XLA_TESTS_HLO_TEST_BASE_H_
 #define XLA_TESTS_HLO_TEST_BASE_H_
 
+// Inclusion of this header indicates that the test has NOT been migrated to use
+// HloRunnerPjRt. Migration requires tagging the build target so that the
+// correct dependencies are included. The whole target must be migrated at once.
+// This macro helps to ensure that migration test base classes are not used in
+// conjunction with HloTestBase.
+// TODO: b/408276009 - Remove these macros once all tests have been migrated.
+#define XLA_TEST_NOT_MIGRATED_TO_HLO_RUNNER_PJRT
+#ifdef XLA_TEST_MIGRATED_TO_HLO_RUNNER_PJRT
+static_assert(false,
+              "HloTestBase cannot be used in the same target as a test that "
+              "has been explicitly migrated to use HloRunnerPjRt.");
+#endif  // XLA_TEST_MIGRATED_TO_HLO_RUNNER_PJRT
+
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "absl/base/attributes.h"
@@ -32,7 +46,6 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/service/backend.h"
 #include "xla/service/computation_placer.h"
-#include "xla/service/executable.h"
 #include "xla/service/hlo_runner.h"
 #include "xla/service/hlo_runner_interface.h"
 #include "xla/stream_executor/device_memory_allocator.h"
@@ -134,10 +147,9 @@ class ABSL_DEPRECATED(
   absl::StatusOr<std::vector<Literal>> ExecuteReplicatedWithHloRunner(
       OpaqueExecutable* executable,
       const HloRunnerInterface::ReplicatedExecuteOptions& options,
-      DeviceAssignment* device_assignment,
-      ExecutionProfile* profile = nullptr) {
+      DeviceAssignment* device_assignment) {
     return test_runner_as_hlo_runner().ExecuteReplicated(
-        executable, options, device_assignment, profile);
+        executable, options, device_assignment, nullptr);
   }
 
   [[nodiscard]] ::testing::AssertionResult RunAndCompareFromFile(
@@ -193,8 +205,6 @@ class ABSL_DEPRECATED(
     return backend().device_count();
   }
 
-  absl::StatusOr<std::unique_ptr<HloRunnerInterface>> GetHloRunner();
-
   // Helper functions to get test and reference platforms.
   static se::Platform* GetReferencePlatform();
   static se::Platform* GetTestPlatform();
@@ -205,7 +215,15 @@ class ABSL_DEPRECATED(
   ErrorSpec error_spec_{0.0001};
 
  private:
-  se::Platform* test_platform_;
+  HloTestBase(std::tuple<std::unique_ptr<HloRunnerInterface>,
+                         HloRunnerAgnosticTestBase::DeviceShapeRepresentationFn,
+                         HloRunnerAgnosticTestBase::DeviceShapeSizeFn>
+                  test_runner_and_functions,
+              std::unique_ptr<HloRunnerInterface> reference_runner,
+              bool verifier_layout_sensitive,
+              bool allow_mixed_precision_in_hlo_verifier,
+              HloPredicate instruction_can_change_layout_func);
+
   std::unique_ptr<se::DeviceMemoryAllocator> allocator_;
 };
 

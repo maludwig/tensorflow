@@ -32,7 +32,7 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "grpcpp/channel.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
-#include "tsl/platform/env.h"
+#include "xla/tsl/platform/env.h"
 
 namespace tsl {
 class CoordinationServiceAgent;
@@ -62,14 +62,9 @@ class DistributedRuntimeClient {
     // expires, then shutdown() reports an error and returns control.
     absl::Duration shutdown_timeout = absl::Minutes(5);
 
-    // Interval at which the client should send heartbeat RPCs to the
-    // coordinator.
-    absl::Duration heartbeat_interval = absl::Seconds(10);
-
-    // How many failed heartbeat RPCs may fail due to a possibly-ephemeral
-    // reason before we decide the coordinator has vanished and that we should
-    // shut down.
-    int max_missing_heartbeats = 10;
+    // The duration after which the service concludes a client has vanished if
+    // it hasn't received any heartbeats from the client.
+    absl::Duration heartbeat_timeout = absl::Seconds(100);
 
     // Callback invoked by the client when notification of a missing heartbeat
     // is reported by the coordinator, or we have not heard from the coordinator
@@ -94,6 +89,10 @@ class DistributedRuntimeClient {
     // coordination service at the startup.
     // TODO(b/355706798): eventually remove this option.
     bool poll_for_error_from_service_at_startup = true;
+
+    // If true, a multi-controller JAX job can continue even if this client
+    // fails. Otherwise, the job will fail when the task fails.
+    bool recoverable = false;
   };
 
   virtual ~DistributedRuntimeClient() = default;
@@ -119,6 +118,11 @@ class DistributedRuntimeClient {
 
   // Returns `NotFoundError` immediately if the key is not found.
   virtual absl::StatusOr<std::string> KeyValueTryGet(absl::string_view key) = 0;
+
+  // Returns `FailedPreconditionError` if the corresponding value is not int
+  // convertible.
+  virtual absl::StatusOr<int64_t> KeyValueIncrement(absl::string_view key,
+                                                    int64_t increment) = 0;
 
   // Get all key-value pairs under a directory (key).
   // A value is considered to be in the directory if its key is prefixed with

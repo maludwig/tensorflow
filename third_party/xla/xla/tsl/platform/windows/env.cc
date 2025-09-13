@@ -36,6 +36,7 @@ limitations under the License.
 #include "xla/tsl/platform/windows/windows_file_system.h"
 #include "xla/tsl/protobuf/error_codes.pb.h"
 #include "tsl/platform/load_library.h"
+#include "tsl/platform/mutex.h"
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -47,7 +48,8 @@ mutex name_mutex(tsl::LINKER_INITIALIZED);
 
 std::map<std::thread::id, string>& GetThreadNameRegistry()
     TF_EXCLUSIVE_LOCKS_REQUIRED(name_mutex) {
-  static auto* thread_name_registry = new std::map<std::thread::id, string>();
+  static auto* const thread_name_registry =
+      new std::map<std::thread::id, string>();
   return *thread_name_registry;
 }
 
@@ -55,20 +57,26 @@ class StdThread : public Thread {
  public:
   // thread_options is ignored.
   StdThread(const ThreadOptions& thread_options, const string& name,
-            absl::AnyInvocable<void()> fn)
-      : thread_(std::move(fn)) {
+            absl::AnyInvocable<void()> fn, bool detached = false)
+      : detached_(detached), thread_(std::move(fn)) {
+    if (detached) {
+      thread_.detach();
+    }
     mutex_lock l(name_mutex);
     GetThreadNameRegistry().emplace(thread_.get_id(), name);
   }
 
   ~StdThread() override {
     std::thread::id thread_id = thread_.get_id();
-    thread_.join();
+    if (!detached_) {
+      thread_.join();
+    }
     mutex_lock l(name_mutex);
     GetThreadNameRegistry().erase(thread_id);
   }
 
  private:
+  bool detached_;
   std::thread thread_;
 };
 
@@ -102,6 +110,13 @@ class WindowsEnv : public Env {
   Thread* StartThread(const ThreadOptions& thread_options, const string& name,
                       absl::AnyInvocable<void()> fn) override {
     return new StdThread(thread_options, name, std::move(fn));
+  }
+
+  void StartDetachedThread(const ThreadOptions& thread_options,
+                           const string& name,
+                           absl::AnyInvocable<void()> fn) override {
+    StdThread detached_thread(thread_options, name, std::move(fn),
+                              /*detached=*/true);
   }
 
   int64_t GetCurrentThreadId() override {
@@ -198,7 +213,7 @@ REGISTER_FILE_SYSTEM("file", LocalWinFileSystem);
 REGISTER_FILE_SYSTEM("ram", RamFileSystem);
 
 Env* Env::Default() {
-  static Env* default_env = new WindowsEnv;
+  static Env* const default_env = new WindowsEnv;
   return default_env;
 }
 

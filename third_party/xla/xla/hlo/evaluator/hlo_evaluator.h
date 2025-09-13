@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef XLA_HLO_EVALUATOR_HLO_EVALUATOR_H_
 #define XLA_HLO_EVALUATOR_HLO_EVALUATOR_H_
 
+#include "absl/log/log.h"
 #define _USE_MATH_DEFINES
 
 #include <complex>
@@ -39,6 +40,7 @@ limitations under the License.
 #include "xla/array2d.h"
 #include "xla/comparison_util.h"
 #include "xla/hlo/analysis/tuple_points_to_analysis.h"
+#include "xla/hlo/evaluator/hlo_evaluator_interface.h"
 #include "xla/hlo/ir/dfs_hlo_visitor.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -46,7 +48,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/literal.h"
-#include "xla/service/call_graph.h"
 #include "xla/service/dynamic_dimension_inference.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -58,21 +59,24 @@ limitations under the License.
 
 namespace xla {
 
-// Responsible for evaluating HLO and obtain literal as the evaluation results.
+// Responsible for evaluating HLO and obtaining the evaluation result.
 //
 // This class is not thread-safe.
-class HloEvaluator : public ConstDfsHloVisitorWithDefault {
+class HloEvaluator : public ConstDfsHloVisitorWithDefault,
+                     public HloEvaluatorInterface {
  public:
   // Precomputed analyses that can be passed to Evaluate functions to avoid
   // recomputation during evaluation.
   struct PrecomputedAnalyses {
     TuplePointsToAnalysis* tuple_points_to;
-    CallGraph* call_graph;
   };
 
   // Only evaluate up to max_loop_iterations per while-loop execution if
   // specified.
   explicit HloEvaluator(int64_t max_loop_iterations = -1);
+
+  // Returns true if the opcode is implemented by HloEvaluator. False otherwise.
+  static bool IsOpcodeImplemented(HloOpcode opcode);
 
   // Called by the evaluator to create an embedded evaluator to execute a
   // sub-region of control flow. Subclasses should override this to return an
@@ -125,8 +129,9 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   //
   // (Dummy template arg is to reduce the overloading priority of one overload
   // so that Evaluate(module, {}) resolves unambiguously.)
-  absl::StatusOr<Literal> Evaluate(const HloComputation& computation,
-                                   absl::Span<const Literal* const> args);
+  absl::StatusOr<Literal> Evaluate(
+      const HloComputation& computation,
+      absl::Span<const Literal* const> args) override;
 
   template <typename Dummy = void>
   absl::StatusOr<Literal> Evaluate(const HloComputation& computation,
@@ -148,26 +153,27 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   // The caller may pass in non-null `precomputed_analyses` to avoid
   // recomputation during evaluation; the caller must ensure that any
   // precomputed analyses were performed on the module containing `instruction`.
+  // The optional `substitutions` map can be used to substitute the given
+  // literals for any instruction in the evaluation graph, usually some of the
+  // instruction's operands.
+  //
+  // For example, given instruction = op(A, B, C) and the map
+  // {A = x, C = y}, this evaluates op(x, B, y).
   absl::StatusOr<Literal> Evaluate(
       const HloInstruction* instruction,
       PrecomputedAnalyses precomputed_analyses = {},
-      bool recursively_evaluate_nonconstant_operands = false);
+      bool recursively_evaluate_nonconstant_operands = false,
+      const absl::flat_hash_map<const HloInstruction*, const LiteralBase*>&
+          substitutions = {});
+
+  void ResetVisitStates() override {
+    ConstDfsHloVisitorWithDefault::ResetVisitStates();
+  }
 
   // Same as Evaluate, except returning false on error and accepts an output
   // pointer.
   bool TryEvaluate(const HloInstruction* instruction, Literal* result,
                    bool recursively_evaluate_nonconstant_operands = false);
-
-  // Evaluates a single HLO instruction, substituting the given literals for
-  // some of the instruction's operands.
-  //
-  // For example, given instruction = op(A, B, C) and the map
-  // {A = x, C = y}, this evaluates op(x, B, y).
-  absl::StatusOr<Literal> EvaluateWithSubstitutions(
-      const HloInstruction* instruction,
-      const absl::flat_hash_map<const HloInstruction*, const LiteralBase*>&
-          substitutions,
-      bool recursively_evaluate_nonconstant_operands = false);
 
   absl::StatusOr<Literal> EvaluateElementwiseBinaryOp(HloOpcode opcode,
                                                       const Literal& lhs,
@@ -187,9 +193,13 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   absl::StatusOr<Literal> EvaluateDotOp(const DotDimensionNumbers& dim_numbers,
                                         const PrecisionConfig& precision_config,
                                         const Literal& lhs, const Literal& rhs);
+  absl::StatusOr<Literal> EvaluateScaledDotOp(
+      const DotDimensionNumbers& dim_numbers,
+      const PrecisionConfig& precision_config, const Literal& lhs,
+      const Literal& lhs_scale, const Literal& rhs, const Literal& rhs_scale);
 
   void set_dynamic_dimension_inference(
-      DynamicDimensionInference* dynamic_dimension_inference) {
+      DynamicDimensionInference* dynamic_dimension_inference) override {
     dynamic_dimension_inference_ = dynamic_dimension_inference;
   }
 
@@ -198,22 +208,16 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   }
 
   // Enable the fast path for certain operations like dot or convolution.
-  void set_use_fast_path(bool value) { use_fast_path_ = value; }
+  void set_use_fast_path(bool value) override { use_fast_path_ = value; }
 
   // Use fast path that doesn't use embedded evaluators in reduce.
   void set_reduce_use_fast_path(bool value) { use_fast_path_reduce_ = value; }
-
-  // Handles evaluation of a custom-call op.
-  // Operand literals are provided in |operands| and implementations must
-  // populate |output| before returning.
-  using CustomCallHandler = std::function<absl::StatusOr<Literal>(
-      const HloInstruction* custom_call, absl::Span<const Literal*> operands)>;
 
   // Sets a handler that is called during evaluation for custom-call ops.
   // If no handler is defined the default error behavior will occur. The handler
   // will be provided evaluated literals for all operands and is expected to
   // return an output literal of the appropriate shape.
-  void set_custom_call_handler(CustomCallHandler handler) {
+  void set_custom_call_handler(CustomCallHandler handler) override {
     custom_call_handler_ = std::move(handler);
   }
 
@@ -355,7 +359,7 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   absl::Status HandleReverse(const HloInstruction* reverse) override;
   absl::Status HandleSelectAndScatter(
       const HloInstruction* select_and_scatter) override;
-  absl::Status HandleSlice(const HloInstruction* slice) override;
+  absl::Status HandleSlice(const HloInstruction* hlo) override;
   absl::Status HandleSort(const HloInstruction* sort) override;
   absl::Status HandleStochasticConvert(
       const HloInstruction* stochastic_convert) override;
@@ -366,6 +370,8 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   absl::Status HandleReduceWindow(const HloInstruction* hlo) override;
   absl::Status HandleMap(const HloInstruction* map) override;
   absl::Status HandleCustomCall(const HloInstruction* custom_call) override;
+  absl::Status HandleOptimizationBarrier(
+      const HloInstruction* optimization_barrier) override;
 
   // Unsupported HLOs, note some of them (such as BatchNorm*) are typically
   // expanded in a semantic-preserving way into other HLOs by adding expansion
@@ -415,6 +421,9 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   // Returns the already-evaluated literal result for the instruction and
   // removes it from internal evaluate state.
   Literal ExtractEvaluatedLiteralFor(const HloInstruction* hlo) {
+    if (state_.has_evaluated(hlo)) {
+      return state_.extract_evaluated(hlo);
+    }
     if (hlo->IsConstant()) {
       return hlo->literal().Clone();
     }
@@ -422,9 +431,7 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
       return state_.arg(hlo->parameter_number())->Clone();
     }
 
-    CHECK(state_.has_evaluated(hlo))
-        << "could not find evaluated value for: " << hlo->ToString();
-    return state_.extract_evaluated(hlo);
+    LOG(FATAL) << "could not find evaluated value for: " << hlo->ToString();
   }
 
   // Returns true if the given hlo has been evaluated and cached.
@@ -593,7 +600,6 @@ class HloEvaluator : public ConstDfsHloVisitorWithDefault {
   TraceMACHandler trace_mac_handler_;
 
   // TODO(ezhulenev): Move cache members to EvaluationState.
-  std::unique_ptr<CallGraph> call_graph_cache_;
   std::unique_ptr<TuplePointsToAnalysis> tuple_points_to_analysis_cache_;
 
   // Set by EvaluateInternal and opportunitiscally used by the HandleXXX

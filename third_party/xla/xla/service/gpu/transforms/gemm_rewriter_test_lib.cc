@@ -21,6 +21,7 @@ limitations under the License.
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
 #include "xla/service/gpu/tests/gpu_codegen_test.h"
+#include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/semantic_version.h"
 #include "xla/xla.pb.h"
@@ -67,12 +68,11 @@ bool GemmRewriteTestBase::IsBlackwell() const {
 }
 
 stream_executor::GpuComputeCapability
-GemmRewriteTestBase::CudaHopperOrRocmMI300() {
+GemmRewriteTestBase::CudaHopperOrRocmCapability() {
   if (IsCuda()) {
-    return stream_executor::CudaComputeCapability::Hopper();
-  } else {
-    return stream_executor::RocmComputeCapability{"gfx942"};
+    return se::CudaComputeCapability::Hopper();
   }
+  return std::get<se::RocmComputeCapability>(Capability());
 }
 
 DebugOptions GemmRewriteTestBase::GetDebugOptionsForTest() const {
@@ -100,8 +100,8 @@ bool GemmRewriteTestBase::HasFp8Support() const {
 
 bool GemmRewriteTestBase::HasCudaComputeCapability(
     const stream_executor::CudaComputeCapability& cc) const {
-  return IsCuda() &&
-         std::get<se::CudaComputeCapability>(Capability()).IsAtLeast(cc);
+  return IsCuda() && std::get<se::CudaComputeCapability>(Capability())
+                         .SupportsAllFeaturesOf(cc);
 }
 
 ParameterizedGemmRewriteTestBase::ParameterizedGemmRewriteTestBase() {

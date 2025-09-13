@@ -21,6 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/data/dataset_utils.h"
 #include "tensorflow/core/data/name_utils.h"
@@ -543,7 +544,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         InvocationResult() = default;
         explicit InvocationResult(int64_t id) : id(id) {}
 
-        Notification notification;
+        absl::Notification notification;
         absl::Status status;
         std::vector<Tensor> return_values;
         bool end_of_input = false;
@@ -742,7 +743,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
           *end_of_sequence = false;
           return absl::OkStatus();
         }
-        if (errors::IsOutOfRange(result->status)) {
+        if (absl::IsOutOfRange(result->status)) {
           // To guarantee that the transformation preserves the cardinality of
           // the dataset, we convert `OutOfRange` to `InvalidArgument` as the
           // former may be interpreted by a caller as the end of sequence.

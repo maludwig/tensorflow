@@ -55,8 +55,18 @@ class CpuElementalIrEmitter final : public ElementalIrEmitter {
   absl::StatusOr<llvm::Value*> EmitTanh(PrimitiveType prim_type,
                                         llvm::Value* value) override;
 
+  absl::StatusOr<llvm::Value*> EmitAcosh(PrimitiveType prim_type,
+                                         llvm::Value* value) override;
+
   absl::StatusOr<llvm::Value*> EmitErf(PrimitiveType prim_type,
                                        llvm::Value* value) override;
+
+  absl::StatusOr<llvm::Value*> EmitExp(PrimitiveType prim_type,
+                                       llvm::Value* value,
+                                       absl::string_view name) override;
+
+  absl::StatusOr<llvm::Value*> EmitRsqrt(PrimitiveType prim_type,
+                                         llvm::Value* value) override;
 
   absl::StatusOr<std::vector<llvm::Value*>> EmitThreadLocalCall(
       const HloComputation& callee, absl::Span<llvm::Value* const> parameters,

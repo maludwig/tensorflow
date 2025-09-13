@@ -59,6 +59,8 @@ class StringFutureChunkDestination : public aux::ChunkDestination {
     return absl::OkStatus();
   }
 
+  void Poison(absl::Status s) override { CHECK_OK(s); }
+
   absl::StatusOr<std::string> ConsumeFinalResult() {
     absl::MutexLock l(&mu_);
     std::sort(chunks_.begin(), chunks_.end());
@@ -81,10 +83,10 @@ class StringFutureChunkDestination : public aux::ChunkDestination {
 
 std::pair<xla::PjRtFuture<std::string>, tsl::RCReference<ChunkDestination>>
 ChunkDestination::MakeStringDest() {
-  auto promise = xla::PjRtFuture<std::string>::CreatePromise();
-  auto result = xla::PjRtFuture<std::string>(promise);
+  auto [promise, result] = xla::PjRtFuture<std::string>::MakePromise();
   return std::make_pair(
-      result, tsl::MakeRef<StringFutureChunkDestination>(std::move(promise)));
+      std::move(result),
+      tsl::MakeRef<StringFutureChunkDestination>(std::move(promise)));
 }
 
 class LocalBulkTransport : public BulkTransportInterface {

@@ -21,7 +21,6 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -35,17 +34,16 @@ limitations under the License.
 #include "xla/executable_run_options.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/literal.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/executable.pb.h"
 #include "xla/service/custom_call_status.h"
 #include "xla/service/custom_call_status_internal.h"
 #include "xla/service/executable.h"
+#include "xla/service/hlo_execution_profile.h"
 #include "xla/service/hlo_profile_printer_data.pb.h"
 #include "xla/service/hlo_value.h"
 #include "xla/service/maybe_owning_device_memory.h"
 #include "xla/service/service_executable_run_options.h"
-#include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 
 namespace xla {
@@ -61,7 +59,7 @@ class CpuExecutable : public Executable {
   // `entry_function_name` in the `jit`.
   static absl::StatusOr<std::unique_ptr<CpuExecutable>> Create(
       std::unique_ptr<FunctionLibrary> function_library,
-      std::unique_ptr<const BufferAssignment> assignment,
+      std::unique_ptr<BufferAssignment> assignment,
       std::unique_ptr<HloModule> hlo_module,
       const std::string& entry_function_name,
       std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data,
@@ -70,7 +68,7 @@ class CpuExecutable : public Executable {
   // Creates a CpuExecutable from a thunk sequence.
   static absl::StatusOr<std::unique_ptr<CpuExecutable>> Create(
       std::unique_ptr<FunctionLibrary> function_library,
-      std::unique_ptr<const BufferAssignment> assignment,
+      std::unique_ptr<BufferAssignment> assignment,
       std::unique_ptr<HloModule> hlo_module, ThunkSequence thunks,
       std::vector<ConstantAllocation> constants,
       std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data,
@@ -93,7 +91,7 @@ class CpuExecutable : public Executable {
   absl::Status ExecuteThunks(const ExecutableRunOptions* run_options,
                              absl::Span<MaybeOwningDeviceMemory const> buffers);
 
-  absl::Span<const std::string> obj_files() const { return obj_files_; }
+  absl::Span<const ObjFileProto> obj_files() const { return obj_files_; }
 
   std::vector<SymbolProto> get_compiled_symbols_proto() const {
     std::vector<SymbolProto> symbols;
@@ -106,7 +104,7 @@ class CpuExecutable : public Executable {
     return symbols;
   }
 
-  void set_obj_files(std::vector<std::string> obj_files) {
+  void set_obj_files(std::vector<ObjFileProto> obj_files) {
     obj_files_ = std::move(obj_files);
   }
 
@@ -154,6 +152,8 @@ class CpuExecutable : public Executable {
   bool has_thunks() const { return thunks_.has_value(); }
   ThunkExecutor& thunks() { return *thunks_; }
 
+  bool has_xnn_fusions() const { return has_xnn_fusions_; }
+
   const BufferAssignment& buffer_assignment() const { return *assignment_; }
   absl::Span<const ConstantAllocation> constants() const { return constants_; }
 
@@ -168,6 +168,10 @@ class CpuExecutable : public Executable {
   std::unique_ptr<FunctionLibrary> consume_function_library() && {
     return std::move(function_library_);
   }
+
+  // Finalize construction of the CpuExecutable and finalize all internal data
+  // structures that might have been used at compile time.
+  void Finalize();
 
  private:
   // Creates an array suitable for passing as the "buffer_table" argument to the
@@ -210,7 +214,7 @@ class CpuExecutable : public Executable {
   // Object files (machine code) compiled from an HLO module by the JIT
   // compiler. We capture all object files created by JitCompiler so we can
   // export them to AOT compilation result.
-  std::vector<std::string> obj_files_;
+  std::vector<ObjFileProto> obj_files_;
 
   // Generate compiled symbols. We capture all compiled symbols so we can export
   // them to AOT compilation result.
@@ -220,7 +224,7 @@ class CpuExecutable : public Executable {
       symbol_type_id_to_function_type_id_;
 
   // Buffer assignment for the buffers we need to allocate.
-  const std::unique_ptr<const BufferAssignment> assignment_;
+  std::shared_ptr<BufferAssignment> assignment_;
 
   // The LLVM IR, in string format, of the unoptimized module generated for this
   // CpuExecutable. We save a string instead of an llvm::Module* because leaving
@@ -249,13 +253,16 @@ class CpuExecutable : public Executable {
   // Vector indexed by BufferAllocation::Index for efficient access.
   std::vector<ConstantAllocation> constants_;
 
+  // Whether the thunk executor contains any XNN fusion thunks.
+  bool has_xnn_fusions_ = false;
+
   // Entry function name for the computation.
-  const std::string entry_function_name_;
+  std::string entry_function_name_;
 
   CpuExecutable(std::unique_ptr<HloModule> hlo_module,
                 std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data,
                 std::unique_ptr<HloProfileIndexMap> hlo_profile_index_map,
-                std::unique_ptr<const BufferAssignment> assignment);
+                std::unique_ptr<BufferAssignment> assignment);
   CpuExecutable(const CpuExecutable&) = delete;
   CpuExecutable& operator=(const CpuExecutable&) = delete;
 };

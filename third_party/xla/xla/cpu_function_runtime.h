@@ -21,6 +21,7 @@ limitations under the License.
 #include <cassert>
 #include <cstdlib>
 
+#include "absl/base/macros.h"
 #include "xla/backends/cpu/alignment.h"
 
 namespace xla {
@@ -44,8 +45,7 @@ class BufferInfo {
         entry_param_number_(encoded.entry_param_number),
         result_param_number_(encoded.result_param_number) {}
 
-  // Returns true if this buffer stores a constant.  These never need to be
-  // allocated by the runtime.
+  // Returns true if this buffer stores a constant.
   bool is_constant() const { return kind() == Kind::kConstant; }
 
   // Returns true if this buffer stores an entry parameter.  These may or may
@@ -178,21 +178,12 @@ class BufferInfo {
 };
 
 // Align to 64-bytes, to mimic tsl::Allocator::kAllocatorAlignment.
+ABSL_DEPRECATE_AND_INLINE()
 inline constexpr size_t Align() { return xla::cpu::Align(); }
 
 // The minimum alignment of buffers passed to XLA:CPU.
+ABSL_DEPRECATE_AND_INLINE()
 inline constexpr size_t MinAlign() { return xla::cpu::MinAlign(); }
-
-// When declaring variables that will be passed to an XLA instance as input via
-// set_arg_data(), be it a regular input or a resource variable in the graph,
-// the C++ variables must be aligned.
-//
-// Example usage:
-//   XLA_ALIGN std::array<float, 4> arg_x;
-//   XLA_ALIGN float arg_y;
-//   xla_instance.set_arg_data(0, arg_x.date());
-//   xla_instance.set_arg_data(0, &arg_y);
-#define XLA_ALIGN alignas(xla::cpu_function_runtime::Align())
 
 // AlignedBufferBytes returns the sum of the size of each buffer in
 // `buffer_infos`, skipping constants, on-stack buffers and, if

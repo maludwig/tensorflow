@@ -18,7 +18,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
-#include <functional>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -29,6 +28,7 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -42,13 +42,12 @@ limitations under the License.
 #include "xla/service/pattern_matcher.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/stream_executor/device_description.h"
+#include "xla/stream_executor/cuda/cuda_compute_capability.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/protobuf/dnn.pb.h"
 #include "xla/types.h"
 #include "xla/util.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
 
 #if GOOGLE_CUDA
 #include "third_party/gpus/cuda/include/cuda.h"  // IWYU pragma: keep
@@ -103,58 +102,6 @@ struct NormMetadata {
 // Map from the instruction pointer of a layer norm Custom Call to its metadata.
 using NormMetadataMap = absl::flat_hash_map<HloInstruction*, NormMetadata>;
 
-// Captures multiple HloInstruction pointers and verifies that their target
-// is identical.
-//
-// Example:
-// Pattern cos(x) / sin(x) with cos and sin intended to operate on the same
-// HloInstruction:
-//  UniqueHloInstruction x;
-//  bool m = Match(
-//      instr, m::Divide(m::Cos(m::Op().WithPredicate(x.CaptureOrVerifyFn())),
-//                       m::Sin(m::Op().WithPredicate(x.CaptureOrVerifyFn()))));
-// m is true and x.Instr() returns an HloInstruction pointer to the operand of
-// cosine and sine iff HloInstruction *instr points to a division of a cosine by
-// a sine that operate on the same instruction.
-class UniqueHloInstruction {
- public:
-  UniqueHloInstruction()
-      : is_set_(false),
-        instr_(nullptr),
-        capture_or_verify_([this](const HloInstruction* instr) -> bool {
-          return CaptureOrVerify(const_cast<HloInstruction*>(instr));
-        }) {}
-  HloInstruction* Instr() const { return instr_; }
-  void SetInstr(HloInstruction* instr) {
-    is_set_ = true;
-    instr_ = instr;
-  }
-
-  // Stores instr when invoked the first time. Otherwise, compares instr to the
-  // stored value and sets the stored value to nullptr if the comparison fails.
-  bool CaptureOrVerify(HloInstruction* instr) {
-    if (is_set_ && instr != instr_) {
-      instr_ = nullptr;
-    }
-    if (!is_set_) {
-      is_set_ = true;
-      instr_ = instr;
-    }
-    return instr_;
-  }
-
-  // Returns a std::function for capturing or verifying an instruction using
-  // WithPredicate.
-  std::function<bool(const HloInstruction*)> CaptureOrVerifyFn() const {
-    return capture_or_verify_;
-  }
-
- private:
-  bool is_set_;
-  HloInstruction* instr_;
-  std::function<bool(const HloInstruction*)> capture_or_verify_;
-};
-
 // Returns an architecture-specific constant for the calculation of an upper
 // bound for the size of the scratch space for layer norm kernels.
 absl::StatusOr<int64_t> CConstant(
@@ -183,8 +130,8 @@ bool CompatibleElementType(const HloInstruction* instr) {
 std::vector<int64_t> AdjustedDimensions(const Shape& shape,
                                         absl::Span<const int64_t> dimensions) {
   absl::flat_hash_map<int64_t, int64_t> dimension_map;
-  for (int64_t dimension = 0, non_degen_dimension = 0; dimension < shape.rank();
-       ++dimension) {
+  for (int64_t dimension = 0, non_degen_dimension = 0;
+       dimension < shape.dimensions().size(); ++dimension) {
     if (shape.dimensions(dimension) > 1) {
       dimension_map.insert({dimension, non_degen_dimension});
       non_degen_dimension++;
@@ -328,12 +275,13 @@ std::vector<int64_t> MapDimensions(const Shape& original_shape,
   absl::flat_hash_map<int64_t, std::vector<int64_t>> dimensions_map;
   std::vector<int64_t> original_dimensions, reshaped_dimensions;
   for (int64_t original_dimension = 0, reshaped_dimension = 0;
-       original_dimension < original_shape.rank(); ++original_dimension) {
+       original_dimension < original_shape.dimensions().size();
+       ++original_dimension) {
     original_dimensions.push_back(original_dimension);
     while ((reshaped_dimensions.empty() ||
             dimension_product(reshaped_shape, reshaped_dimensions) <
                 dimension_product(original_shape, original_dimensions)) &&
-           reshaped_dimension < reshaped_shape.rank()) {
+           reshaped_dimension < reshaped_shape.dimensions().size()) {
       reshaped_dimensions.emplace_back(reshaped_dimension++);
     }
 
@@ -594,7 +542,7 @@ auto Expectation(UniqueHloInstruction* expectation, Pattern pattern) {
           .WithPredicate([](const HloInstruction* instr) {
             return CalculatesExpectation(instr);
           })
-          .WithPredicate(expectation->CaptureOrVerifyFn()));
+          .WithPredicate(expectation->capture_or_verify_fn()));
   return m::AnyOf<HloInstruction>(m::Broadcast(shared_subpattern),
                                   shared_subpattern);
 }
@@ -609,7 +557,7 @@ auto Expectation(UniqueHloInstruction* expectation, HloInstruction** reduce,
           .WithPredicate([](const HloInstruction* instr) {
             return CalculatesExpectation(instr);
           })
-          .WithPredicate(expectation->CaptureOrVerifyFn()));
+          .WithPredicate(expectation->capture_or_verify_fn()));
   return m::AnyOf<HloInstruction>(m::Broadcast(shared_subpattern),
                                   shared_subpattern);
 }
@@ -621,19 +569,19 @@ auto Variance(UniqueHloInstruction* variance, UniqueHloInstruction* expectation,
   return m::AnyOf<HloInstruction>(
       Subtract(
           Expectation(Square(OptionalSupportedTransform(
-              m::Op().WithPredicate(x->CaptureOrVerifyFn())))),
-          Square(Expectation(
-              expectation, OptionalSupportedTransform(
-                               m::Op().WithPredicate(x->CaptureOrVerifyFn())))))
-          .WithPredicate(variance->CaptureOrVerifyFn()),
+              m::Op().WithPredicate(x->capture_or_verify_fn())))),
+          Square(Expectation(expectation,
+                             OptionalSupportedTransform(m::Op().WithPredicate(
+                                 x->capture_or_verify_fn())))))
+          .WithPredicate(variance->capture_or_verify_fn()),
       Expectation(
           Square(Subtract(
               OptionalSupportedTransform(
-                  m::Op().WithPredicate(x->CaptureOrVerifyFn())),
+                  m::Op().WithPredicate(x->capture_or_verify_fn())),
               Expectation(expectation,
-                          OptionalSupportedTransform(
-                              m::Op().WithPredicate(x->CaptureOrVerifyFn()))))))
-          .WithPredicate(variance->CaptureOrVerifyFn()));
+                          OptionalSupportedTransform(m::Op().WithPredicate(
+                              x->capture_or_verify_fn()))))))
+          .WithPredicate(variance->capture_or_verify_fn()));
 }
 
 // Reciprocal of the square root of variance + epsilon with optional broadcast.
@@ -644,7 +592,7 @@ auto NormFactor(HloInstruction** norm_factor, UniqueHloInstruction* x,
   auto shared_subpattern = m::SharedSubpattern(Rsqrt(
       norm_factor, AddAnyOrder(Variance(variance, expectation, x),
                                m::Broadcast(m::ConstantScalar().WithPredicate(
-                                   epsilon->CaptureOrVerifyFn())))));
+                                   epsilon->capture_or_verify_fn())))));
   return m::AnyOf<HloInstruction>(m::Broadcast(shared_subpattern),
                                   shared_subpattern);
 }
@@ -693,10 +641,10 @@ auto SubtractMultiplyAddAnyOrder(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4) {
 
 // Expectation fused into a layer norm Custom Call.
 auto FusedExpectation(UniqueHloInstruction* custom_call) {
-  auto shared_subpattern = m::SharedSubpattern(
-      m::GetTupleElement(m::CustomCall({kCudnnNormCallTarget})
-                             .WithPredicate(custom_call->CaptureOrVerifyFn()),
-                         1));
+  auto shared_subpattern = m::SharedSubpattern(m::GetTupleElement(
+      m::CustomCall({kCudnnNormCallTarget})
+          .WithPredicate(custom_call->capture_or_verify_fn()),
+      1));
   return m::AnyOf<HloInstruction>(shared_subpattern,
                                   BitcastOrReshape(shared_subpattern));
 }
@@ -705,20 +653,21 @@ auto FusedExpectation(UniqueHloInstruction* custom_call) {
 auto FusedExpectation(UniqueHloInstruction* fused_expectation,
                       UniqueHloInstruction* custom_call) {
   auto shared_subpattern = m::SharedSubpattern(
-      m::GetTupleElement(m::CustomCall({kCudnnNormCallTarget})
-                             .WithPredicate(custom_call->CaptureOrVerifyFn()),
-                         1)
-          .WithPredicate(fused_expectation->CaptureOrVerifyFn()));
+      m::GetTupleElement(
+          m::CustomCall({kCudnnNormCallTarget})
+              .WithPredicate(custom_call->capture_or_verify_fn()),
+          1)
+          .WithPredicate(fused_expectation->capture_or_verify_fn()));
   return m::AnyOf<HloInstruction>(shared_subpattern,
                                   BitcastOrReshape(shared_subpattern));
 }
 
 // Norm factor fused into a layer norm Custom Call.
 auto FusedNormFactor(UniqueHloInstruction* custom_call) {
-  auto shared_subpattern = m::SharedSubpattern(
-      m::GetTupleElement(m::CustomCall({kCudnnNormCallTarget})
-                             .WithPredicate(custom_call->CaptureOrVerifyFn()),
-                         2));
+  auto shared_subpattern = m::SharedSubpattern(m::GetTupleElement(
+      m::CustomCall({kCudnnNormCallTarget})
+          .WithPredicate(custom_call->capture_or_verify_fn()),
+      2));
   return m::AnyOf<HloInstruction>(shared_subpattern,
                                   BitcastOrReshape(shared_subpattern));
 }
@@ -727,10 +676,11 @@ auto FusedNormFactor(UniqueHloInstruction* custom_call) {
 auto FusedNormFactor(UniqueHloInstruction* fused_norm_factor,
                      UniqueHloInstruction* custom_call) {
   auto shared_subpattern = m::SharedSubpattern(
-      m::GetTupleElement(m::CustomCall({kCudnnNormCallTarget})
-                             .WithPredicate(custom_call->CaptureOrVerifyFn()),
-                         2)
-          .WithPredicate(fused_norm_factor->CaptureOrVerifyFn()));
+      m::GetTupleElement(
+          m::CustomCall({kCudnnNormCallTarget})
+              .WithPredicate(custom_call->capture_or_verify_fn()),
+          2)
+          .WithPredicate(fused_norm_factor->capture_or_verify_fn()));
   return m::AnyOf<HloInstruction>(shared_subpattern,
                                   BitcastOrReshape(shared_subpattern));
 }
@@ -753,9 +703,9 @@ auto XCenter(UniqueHloInstruction* x, UniqueHloInstruction* custom_call,
   auto capture_or_verify_x =
       [x, custom_call, &norm_metadata](const HloInstruction* instr) -> bool {
     return x->CaptureOrVerify(
-        FindTarget(custom_call->Instr(), instr->operand(0),
-                   custom_call->Instr()->operand(0), norm_metadata)
-            ? custom_call->Instr()->mutable_operand(0)
+        FindTarget(custom_call->instr(), instr->operand(0),
+                   custom_call->instr()->operand(0), norm_metadata)
+            ? custom_call->instr()->mutable_operand(0)
             : nullptr);
   };
   return Subtract(m::Op(), m::Broadcast(FusedExpectation(custom_call)))
@@ -772,14 +722,14 @@ auto XCenter(UniqueHloInstruction* x_center, UniqueHloInstruction* x,
   auto capture_or_verify_x =
       [x, custom_call, &norm_metadata](const HloInstruction* instr) -> bool {
     return x->CaptureOrVerify(
-        FindTarget(custom_call->Instr(), instr->operand(0),
-                   custom_call->Instr()->operand(0), norm_metadata)
-            ? custom_call->Instr()->mutable_operand(0)
+        FindTarget(custom_call->instr(), instr->operand(0),
+                   custom_call->instr()->operand(0), norm_metadata)
+            ? custom_call->instr()->mutable_operand(0)
             : nullptr);
   };
   return Subtract(m::Op(), m::Broadcast(FusedExpectation(fused_expectation,
                                                          custom_call)))
-      .WithPredicate(x_center->CaptureOrVerifyFn())
+      .WithPredicate(x_center->capture_or_verify_fn())
       .WithPredicate(capture_or_verify_x);
 }
 
@@ -791,17 +741,17 @@ auto F0(UniqueHloInstruction* custom_call, UniqueHloInstruction* scale,
         HloInstruction** reduce, const NormMetadataMap& norm_metadata) {
   auto capture_or_verify_scale = [scale, custom_call, &norm_metadata](
                                      const HloInstruction* instr) -> bool {
-    return scale->CaptureOrVerify(FindTarget(custom_call->Instr(), instr,
-                                             custom_call->Instr()->operand(1),
+    return scale->CaptureOrVerify(FindTarget(custom_call->instr(), instr,
+                                             custom_call->instr()->operand(1),
                                              norm_metadata)
-                                      ? custom_call->Instr()->mutable_operand(1)
+                                      ? custom_call->instr()->mutable_operand(1)
                                       : nullptr);
   };
   return AddReduce(
       reduce, MultiplyMultiplyAnyOrder(
                   XCenter(x, custom_call, norm_metadata),
                   m::Broadcast(m::Op().WithPredicate(capture_or_verify_scale)),
-                  m::Op().WithPredicate(dy->CaptureOrVerifyFn())));
+                  m::Op().WithPredicate(dy->capture_or_verify_fn())));
 }
 
 // Product of XCenter and the scaled and broadcasted product of F0 and
@@ -826,7 +776,7 @@ auto F1(UniqueHloInstruction* x, UniqueHloInstruction* x_center,
                                        .GetAsDouble({})
                                        .value();
     int64_t nelems = 1;
-    for (int i = 0; i < instr->shape().rank(); ++i) {
+    for (int i = 0; i < instr->shape().dimensions().size(); ++i) {
       if (!absl::c_linear_search(instr->dimensions(), i)) {
         nelems *= instr->shape().dimensions()[i];
       }
@@ -858,16 +808,16 @@ auto F2(UniqueHloInstruction* fused_norm_factor, UniqueHloInstruction* scale,
   auto capture_or_verify_scale = [scale, custom_call, &norm_metadata](
                                      const HloInstruction* instr) -> bool {
     return scale->CaptureOrVerify(
-        FindTarget(custom_call->Instr(), instr->operand(0),
-                   custom_call->Instr()->operand(1), norm_metadata)
-            ? custom_call->Instr()->mutable_operand(1)
+        FindTarget(custom_call->instr(), instr->operand(0),
+                   custom_call->instr()->operand(1), norm_metadata)
+            ? custom_call->instr()->mutable_operand(1)
             : nullptr);
   };
   return MultiplyAnyOrder(
       m::Broadcast(
           BitcastOrReshape(FusedNormFactor(fused_norm_factor, custom_call))),
       MultiplyAnyOrder(m::Broadcast().WithPredicate(capture_or_verify_scale),
-                       m::Op().WithPredicate(dy->CaptureOrVerifyFn())));
+                       m::Op().WithPredicate(dy->capture_or_verify_fn())));
 }
 
 class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
@@ -897,10 +847,10 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
             instr,
             SubtractMultiplyAddAnyOrder(
                 OptionalSupportedTransform(
-                    m::Op().WithPredicate(x.CaptureOrVerifyFn())),
+                    m::Op().WithPredicate(x.capture_or_verify_fn())),
                 Expectation(&expectation, &reduce,
-                            OptionalSupportedTransform(
-                                m::Op().WithPredicate(x.CaptureOrVerifyFn()))),
+                            OptionalSupportedTransform(m::Op().WithPredicate(
+                                x.capture_or_verify_fn()))),
                 NormFactor(&norm_factor, &x, &variance, &expectation, &epsilon),
                 m::Broadcast(&broadcast_scale, m::Op(&scale)),
                 m::Broadcast(&broadcast_bias, m::Op(&bias))))) {
@@ -929,15 +879,15 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       }
 
       // Verify the uniqueness of the inputs.
-      if (!x.Instr() || !expectation.Instr() || !variance.Instr() ||
-          !epsilon.Instr()) {
+      if (!x.instr() || !expectation.instr() || !variance.instr() ||
+          !epsilon.instr()) {
         VLOG(1) << "Layer norm operands not unique.";
         return absl::OkStatus();
       }
 
       // Verify the input and output layouts.
       // TODO(philipphack): Consider supporting more general cases.
-      if (!LayoutUtil::IsMonotonicWithDim0Major(x.Instr()->shape().layout()) ||
+      if (!LayoutUtil::IsMonotonicWithDim0Major(x.instr()->shape().layout()) ||
           !LayoutUtil::IsMonotonicWithDim0Major(scale->shape().layout()) ||
           !LayoutUtil::IsMonotonicWithDim0Major(bias->shape().layout()) ||
           !LayoutUtil::IsMonotonicWithDim0Major(instr->shape().layout())) {
@@ -956,7 +906,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       if (instr->user_count() == 1 &&
           instr->users()[0]->opcode() == HloOpcode::kConvert &&
           ShapeUtil::SameElementType(instr->users()[0]->shape(),
-                                     x.Instr()->shape())) {
+                                     x.instr()->shape())) {
         instr = instr->users()[0];
       }
       if (HloPredicateIsOp<HloOpcode::kConvert>(scale) &&
@@ -978,7 +928,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       }
       if (!CompatibleElementType(instr) || !CompatibleElementType(scale) ||
           !CompatibleElementType(bias) ||
-          !ShapeUtil::SameElementType(instr->shape(), x.Instr()->shape()) ||
+          !ShapeUtil::SameElementType(instr->shape(), x.instr()->shape()) ||
           !ShapeUtil::Equal(scale->shape(), bias->shape())) {
         VLOG(1) << "Layer norm input types or shapes not supported.";
         return absl::OkStatus();
@@ -992,7 +942,9 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
                                      reduce->dimensions().end());
       std::vector<int64_t> norm_dims_adjusted = AdjustedDimensions(reduce);
       if (norm_dims_adjusted.size() !=
-          ShapeUtil::DropDegenerateDimensions(scale->shape()).rank()) {
+          ShapeUtil::DropDegenerateDimensions(scale->shape())
+              .dimensions()
+              .size()) {
         VLOG(1) << "Layer norm input dimensions not supported.";
         return absl::OkStatus();
       }
@@ -1013,14 +965,15 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       // If necessary, transpose the input so that the dimensions not being
       // normalized are the leading dimensions.
       std::vector<int64_t> non_norm_dims;
-      for (int64_t x_dim = 0; x_dim < x.Instr()->shape().rank(); ++x_dim) {
+      for (int64_t x_dim = 0; x_dim < x.instr()->shape().dimensions().size();
+           ++x_dim) {
         if (std::find(norm_dims.begin(), norm_dims.end(), x_dim) ==
             norm_dims.end()) {
           non_norm_dims.push_back(x_dim);
         }
       }
       std::vector<int64_t> non_norm_dims_adjusted =
-          AdjustedDimensions(x.Instr()->shape(), non_norm_dims);
+          AdjustedDimensions(x.instr()->shape(), non_norm_dims);
 
       std::vector<int64_t> x_transpose_order = non_norm_dims;
       x_transpose_order.insert(x_transpose_order.end(), norm_dims.begin(),
@@ -1043,17 +996,17 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
           y_transpose_order[x_transpose_order[k]] = k;
         }
         TF_ASSIGN_OR_RETURN(x_transpose,
-                            MakeTransposeHlo(x.Instr(), x_transpose_order));
+                            MakeTransposeHlo(x.instr(), x_transpose_order));
       }
 
       // Combine the dimensions not normalized into the first dimension of the
       // input as required by cuDNN.
       std::vector<int64_t> reshaped_dims = {1};
       for (auto non_norm_dim : non_norm_dims) {
-        reshaped_dims[0] *= x.Instr()->shape().dimensions(non_norm_dim);
+        reshaped_dims[0] *= x.instr()->shape().dimensions(non_norm_dim);
       }
       for (auto norm_dim : norm_dims) {
-        reshaped_dims.emplace_back(x.Instr()->shape().dimensions(norm_dim));
+        reshaped_dims.emplace_back(x.instr()->shape().dimensions(norm_dim));
       }
       // cuDNN requires tensors to have at least four dimensions.
       while (reshaped_dims.size() < 4) {
@@ -1061,10 +1014,10 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       }
 
       Shape reshaped_shape = ShapeUtil::MakeShape(
-          x.Instr()->shape().element_type(), reshaped_dims);
+          x.instr()->shape().element_type(), reshaped_dims);
       TF_ASSIGN_OR_RETURN(
           HloInstruction * x_reshape,
-          MakeReshapeHlo(reshaped_shape, x_transpose.value_or(x.Instr())));
+          MakeReshapeHlo(reshaped_shape, x_transpose.value_or(x.instr())));
 
       // Reshape the scale and bias. The first dimension corresponds to the
       // non-normalization dimension of the norm input and must have size 1.
@@ -1081,12 +1034,11 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       CudnnNormBackendConfig& backend_config =
           *gpu_backend_config.mutable_cudnn_norm_backend_config();
       backend_config.set_epsilon(
-          epsilon.Instr()->literal().GetAsDouble({}).value());
+          epsilon.instr()->literal().GetAsDouble({}).value());
       backend_config.set_kind(CudnnNormBackendConfig::LAYER_FWD_INFER);
       auto* algorithm = backend_config.mutable_algorithm();
       algorithm->set_algo_id(0);
       algorithm->set_math_type(se::dnn::AlgorithmProto::TENSOR_OP_MATH);
-      algorithm->set_is_cudnn_frontend(true);
 
       // Set the workspace size to its upper bound.
       // TODO(philipphack): Consider autotuning the norm kernels.
@@ -1159,20 +1111,21 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
                                        UniqueHloInstruction& epsilon) {
     HloInstruction* gte = custom_call->users()[0];
     if (Match(instr,
-              m::Divide(m::Op(),
-                        AddAnyOrder(
-                            m::Op().WithPredicate(variance.CaptureOrVerifyFn()),
-                            m::Broadcast(m::ConstantScalar().WithPredicate(
-                                epsilon.CaptureOrVerifyFn())))))) {
+              m::Divide(
+                  m::Op(),
+                  AddAnyOrder(
+                      m::Op().WithPredicate(variance.capture_or_verify_fn()),
+                      m::Broadcast(m::ConstantScalar().WithPredicate(
+                          epsilon.capture_or_verify_fn())))))) {
       // Verify the uniqueness of the operands.
-      if (!variance.Instr() || !epsilon.Instr()) {
+      if (!variance.instr() || !epsilon.instr()) {
         VLOG(1) << "Layer norm operands not unique.";
         return false;
       }
 
       // Verify the element types.
       if (!CompatibleElementType(instr) ||
-          !CompatibleElementType(expectation.Instr())) {
+          !CompatibleElementType(expectation.instr())) {
         VLOG(1) << "Layer norm input types not compatible.";
         return false;
       }
@@ -1193,7 +1146,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       };
 
       Shape expectation_shape =
-          make_compatible_shape(expectation.Instr()->shape());
+          make_compatible_shape(expectation.instr()->shape());
       Shape norm_factor_shape = make_compatible_shape(instr->shape());
 
       // The augmented Custom Call additionally returns the expectation and the
@@ -1258,7 +1211,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       // Replace the result of the original Custom Call as well as the
       // expectation and the norm factor with the augmented Custom Call.
       TF_RETURN_IF_ERROR(replace_with_new_cc(gte, 0));
-      TF_RETURN_IF_ERROR(replace_with_new_cc(expectation.Instr(), 1));
+      TF_RETURN_IF_ERROR(replace_with_new_cc(expectation.instr(), 1));
       TF_RETURN_IF_ERROR(replace_with_new_cc(instr, 2));
 
       // Update the Custom Call associated with the metadata of the forward
@@ -1316,15 +1269,15 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       }
 
       // Verify the uniqueness of the captured Custom Call and inputs.
-      if (!fwd_custom_call.Instr() || !x.Instr() || !dy.Instr() ||
-          !x_center.Instr() || !scale.Instr() || !fused_expectation.Instr() ||
-          !fused_norm_factor.Instr()) {
+      if (!fwd_custom_call.instr() || !x.instr() || !dy.instr() ||
+          !x_center.instr() || !scale.instr() || !fused_expectation.instr() ||
+          !fused_norm_factor.instr()) {
         VLOG(1) << "Layer norm gradient inputs not unique.";
         return absl::OkStatus();
       }
 
       // Retrieve metadata of the forward layer norm.
-      auto norm_metadata = norm_metadata_.find(fwd_custom_call.Instr());
+      auto norm_metadata = norm_metadata_.find(fwd_custom_call.instr());
       if (norm_metadata == norm_metadata_.end()) {
         VLOG(1) << "Unable to retrieve norm metadata of forward Custom Call.";
         return absl::OkStatus();
@@ -1347,7 +1300,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       // broadcasted dimensions.
       float actual_r_nelems = scalar->literal().GetAsDouble({}).value();
       int64_t nelems = 1;
-      for (int i = 0; i < broadcast->shape().rank(); ++i) {
+      for (int i = 0; i < broadcast->shape().dimensions().size(); ++i) {
         if (!absl::c_linear_search(broadcast->dimensions(), i)) {
           nelems *= broadcast->shape().dimensions()[i];
         }
@@ -1369,7 +1322,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
           [&fused_norm_factor, &norm_metadata](
               const UniqueHloInstruction& factor0,
               const UniqueHloInstruction& factor1) -> HloInstruction* {
-        for (HloInstruction* factor0_user : factor0.Instr()->users()) {
+        for (HloInstruction* factor0_user : factor0.instr()->users()) {
           std::vector<HloInstruction*> users;
           SkipUnaryOpsTopDownRecursive(factor0_user, users);
           // One of the users of factor0 must be a chained multiplication by the
@@ -1379,8 +1332,8 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
                       MultiplyAnyOrder(
                           m::Op(), MultiplyAnyOrder(
                                        m::Broadcast(BitcastOrReshape(m::Op().Is(
-                                           fused_norm_factor.Instr()))),
-                                       m::Op().Is(factor1.Instr()))))) {
+                                           fused_norm_factor.instr()))),
+                                       m::Op().Is(factor1.instr()))))) {
               // Dscale is an addition-reduction of the product.
               for (HloInstruction* multiply_user : user->users()) {
                 if (AppliesAddReduce(
@@ -1402,12 +1355,12 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
 
       // Find Dbias, i.e. an addition-reduction of DY, starting from DY.
       // Rewriting proceeds without fusing Dbias if unsuccessful.
-      dbias = FindAddReduce(dy.Instr(),
+      dbias = FindAddReduce(dy.instr(),
                             norm_metadata->second.non_norm_dims_adjusted);
 
       // Verify the input and output layouts.
       // TODO(philipphack): Consider supporting more general cases.
-      if (!LayoutUtil::IsMonotonicWithDim0Major(dy.Instr()->shape().layout()) ||
+      if (!LayoutUtil::IsMonotonicWithDim0Major(dy.instr()->shape().layout()) ||
           !LayoutUtil::IsMonotonicWithDim0Major(instr->shape().layout()) ||
           !LayoutUtil::IsMonotonicWithDim0Major(dscale->shape().layout()) ||
           (dbias &&
@@ -1417,7 +1370,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       }
 
       // The types of X and DX must match.
-      if (x.Instr()->shape().element_type() != instr->shape().element_type()) {
+      if (x.instr()->shape().element_type() != instr->shape().element_type()) {
         VLOG(1) << "The types of X and DX must match.";
         return absl::OkStatus();
       }
@@ -1425,18 +1378,18 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       // The types and shapes of scale, Dscale and Dbias (if present) must
       // match.
       if (!ShapeUtil::Equal(
-              ShapeUtil::DropDegenerateDimensions(scale.Instr()->shape()),
+              ShapeUtil::DropDegenerateDimensions(scale.instr()->shape()),
               ShapeUtil::DropDegenerateDimensions(dscale->shape())) ||
           (dbias &&
            !ShapeUtil::Equal(
-               ShapeUtil::DropDegenerateDimensions(scale.Instr()->shape()),
+               ShapeUtil::DropDegenerateDimensions(scale.instr()->shape()),
                ShapeUtil::DropDegenerateDimensions(dbias->shape())))) {
         VLOG(1) << "Backward layer norm types not supported.";
         return absl::OkStatus();
       }
 
       // Verify the element types.
-      if (!CompatibleElementType(dy.Instr())) {
+      if (!CompatibleElementType(dy.instr())) {
         VLOG(1) << "Backward layer norm types not supported.";
         return absl::OkStatus();
       }
@@ -1444,34 +1397,34 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       // cuDNN requires the byte size of the element type of X to be at least
       // that of DY and scale.
       if (ShapeUtil::ByteSizeOfPrimitiveType(
-              x.Instr()->shape().element_type()) <
+              x.instr()->shape().element_type()) <
               ShapeUtil::ByteSizeOfPrimitiveType(
-                  dy.Instr()->shape().element_type()) ||
+                  dy.instr()->shape().element_type()) ||
           ShapeUtil::ByteSizeOfPrimitiveType(
-              x.Instr()->shape().element_type()) <
+              x.instr()->shape().element_type()) <
               ShapeUtil::ByteSizeOfPrimitiveType(
-                  scale.Instr()->shape().element_type())) {
+                  scale.instr()->shape().element_type())) {
         VLOG(1) << "Backward layer norm types not supported.";
         return absl::OkStatus();
       }
 
       // Transpose DY applying the stored transpose order of X from the forward
       // graph.
-      HloInstruction* transposed_dy = dy.Instr();
+      HloInstruction* transposed_dy = dy.instr();
       if (norm_metadata->second.x_transpose) {
         TF_ASSIGN_OR_RETURN(
             transposed_dy,
-            MakeTransposeHlo(dy.Instr(),
+            MakeTransposeHlo(dy.instr(),
                              norm_metadata->second.x_transpose->dimensions()));
       }
       TF_ASSIGN_OR_RETURN(HloInstruction * reshaped_dy,
-                          MakeReshapeHlo(x.Instr()->shape(), transposed_dy));
+                          MakeReshapeHlo(x.instr()->shape(), transposed_dy));
 
       Shape dx_shape = ShapeUtil::MakeShape(instr->shape().element_type(),
-                                            x.Instr()->shape().dimensions());
+                                            x.instr()->shape().dimensions());
 
       Shape dscale_dbias_shape = ShapeUtil::MakeShape(
-          dscale->shape().element_type(), scale.Instr()->shape().dimensions());
+          dscale->shape().element_type(), scale.instr()->shape().dimensions());
 
       GpuBackendConfig gpu_backend_config;
       CudnnNormBackendConfig& backend_config =
@@ -1480,7 +1433,6 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       auto* algorithm = backend_config.mutable_algorithm();
       algorithm->set_algo_id(0);
       algorithm->set_math_type(se::dnn::AlgorithmProto::TENSOR_OP_MATH);
-      algorithm->set_is_cudnn_frontend(true);
 
       // Set the workspace size to its upper bound.
       // TODO(philipphack): Consider autotuning the norm kernels.
@@ -1488,7 +1440,7 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
                           CConstant(cuda_compute_capability_));
       const int64_t workspace_size =
           (2 * c_constant * (4 + 256)) +
-          (2 * x.Instr()->shape().dimensions(0) * 4) + 64;
+          (2 * x.instr()->shape().dimensions(0) * 4) + 64;
       algorithm->mutable_workspace_size()->set_value(workspace_size);
 
       // The output of the Custom Call is a tuple. The output shape of Dscale
@@ -1500,8 +1452,8 @@ class CudnnNormRewriterVisitor : public DfsHloRewriteVisitor {
       HloInstruction* custom_call =
           instr->AddInstruction(HloInstruction::CreateCustomCall(
               custom_call_shape,
-              {x.Instr(), scale.Instr(), reshaped_dy, fused_expectation.Instr(),
-               fused_norm_factor.Instr()},
+              {x.instr(), scale.instr(), reshaped_dy, fused_expectation.instr(),
+               fused_norm_factor.instr()},
               kCudnnNormCallTarget));
       TF_RETURN_IF_ERROR(custom_call->set_backend_config(gpu_backend_config));
 

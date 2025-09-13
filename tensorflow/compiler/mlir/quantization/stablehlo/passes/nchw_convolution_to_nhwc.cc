@@ -48,28 +48,29 @@ class NchwConvolutionToNhwcPass
 // * Src dimension numbers: [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1]
 // * Dst dimension numbers: [b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]
 class RewriteNchwConvolutionToNhwc
-    : public OpRewritePattern<
-          mlir::stablehlo::ConvolutionOp>::SplitMatchAndRewrite {
+    : public OpRewritePattern<mlir::stablehlo::ConvolutionOp> {
  public:
-  using SplitMatchAndRewrite::SplitMatchAndRewrite;
+  using OpRewritePattern::OpRewritePattern;
 
-  LogicalResult match(mlir::stablehlo::ConvolutionOp op) const override {
+  LogicalResult matchAndRewrite(mlir::stablehlo::ConvolutionOp op,
+                                PatternRewriter& rewriter) const override {
     // Handles 2D convolutions only.
     if (!HasRankOf(op.getOperand(0), /*rank=*/4) ||
         !HasRankOf(op.getOperand(1), /*rank=*/4)) {
       return failure();
     }
 
-    if (!IsOpNotQuantized(op)) return failure();
+    if (!quant::IsOpNotQuantized(op)) return failure();
 
     const ConvDimensionNumbersAttr dimension_nums = op.getDimensionNumbers();
-    return success(MatchInputDimensionNumbers(dimension_nums) &&
-                   MatchKernelDimensionNumbers(dimension_nums) &&
-                   MatchOutputDimensionNumbers(dimension_nums));
-  }
+    const bool dimension_nums_matched =
+        MatchInputDimensionNumbers(dimension_nums) &&
+        MatchKernelDimensionNumbers(dimension_nums) &&
+        MatchOutputDimensionNumbers(dimension_nums);
+    if (!dimension_nums_matched) {
+      return failure();
+    }
 
-  void rewrite(mlir::stablehlo::ConvolutionOp op,
-               PatternRewriter& rewriter) const override {
     // Transpose the input tensor: [b, f, 0, 1] => [b, 0, 1, f]
     Value input = op->getOperand(0);
     const TensorType new_input_tensor_type = GetTransposedTensorType(
@@ -130,6 +131,7 @@ class RewriteNchwConvolutionToNhwc
         rewriter.getDenseI64ArrayAttr(kNhwcToNchwPermutation));
 
     rewriter.replaceAllUsesWith(op, output_transpose_op);
+    return success();
   }
 
  private:
@@ -166,7 +168,7 @@ class RewriteNchwConvolutionToNhwc
   TensorType GetTransposedTensorType(
       const TensorType type, const ArrayRef<int64_t> permutation) const {
     const SmallVector<int64_t> after_shape =
-        Permute<int64_t>(type.getShape(), permutation);
+        quant::Permute<int64_t>(type.getShape(), permutation);
     return type.cloneWith(after_shape, type.getElementType());
   }
 };

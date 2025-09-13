@@ -15,16 +15,23 @@ limitations under the License.
 
 #include "xla/service/service.h"
 
-#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
@@ -60,14 +67,13 @@ limitations under the License.
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
 #include "tsl/platform/protobuf.h"
-#include "tsl/platform/status.h"
-#include "tsl/platform/statusor.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
 
 namespace xla {
@@ -595,10 +601,13 @@ Service::ExecuteGraphParallel(
     // shapes of the arguments, so, it is sufficient to use the arguments of
     // replica 0.
     TF_ASSIGN_OR_RETURN(
+        ProgramShape program_shape,
+        ProgramShape::FromProto(
+            computation.computation.proto().host_program_shape()));
+    TF_ASSIGN_OR_RETURN(
         std::unique_ptr<HloModuleConfig> module_config,
-        CreateModuleConfig(
-            ProgramShape{computation.computation.proto().host_program_shape()},
-            replicated_arguments.front(), computation.execution_options));
+        CreateModuleConfig(program_shape, replicated_arguments.front(),
+                           computation.execution_options));
     VLOG(3)
         << "ExecuteGraphParallel created HloModuleConfig computation layout: "
         << module_config->entry_computation_layout().ToString();
@@ -823,9 +832,11 @@ absl::StatusOr<ExecutionHandle> Service::Compile(
   }
 
   TF_ASSIGN_OR_RETURN(
-      std::unique_ptr<HloModuleConfig> module_config,
-      CreateModuleConfig(ProgramShape{computation.proto().host_program_shape()},
-                         argument_shape_ptrs, &execution_options));
+      ProgramShape program_shape,
+      ProgramShape::FromProto(computation.proto().host_program_shape()));
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModuleConfig> module_config,
+                      CreateModuleConfig(program_shape, argument_shape_ptrs,
+                                         &execution_options));
   VLOG(3) << "Compile created HloModuleConfig computation layout: "
           << module_config->entry_computation_layout().ToString();
 
@@ -894,7 +905,7 @@ absl::StatusOr<std::unique_ptr<GlobalData>> Service::Execute(
       ExecuteAndRegisterResult(
           executable.get(), replicated_arguments, execute_backend_.get(),
           SingleComputationDeviceHandle(),
-          "result of " + executable->module().name(), execution_profile));
+          absl::StrCat("result of ", executable->name()), execution_profile));
 
   if (executable->dumping_snapshot()) {
     TF_ASSIGN_OR_RETURN(const ShapedBuffer* result_buffer,
@@ -1059,7 +1070,9 @@ absl::StatusOr<Literal> Service::ComputeConstantGraph(
         "constant computation may not depend on any parameters.");
   }
 
-  ProgramShape program_shape(computation.proto().host_program_shape());
+  TF_ASSIGN_OR_RETURN(
+      ProgramShape program_shape,
+      ProgramShape::FromProto(computation.proto().host_program_shape()));
   TF_DCHECK_OK(ShapeUtil::ValidateShape(program_shape.result()));
 
   if (output_layout) {
@@ -1084,7 +1097,7 @@ absl::StatusOr<Literal> Service::ComputeConstantGraph(
          absl::Span<const Literal*> operands) -> absl::StatusOr<Literal> {
         if (custom_call->custom_call_target() == "SliceToDynamic") {
           auto result = operands[0]->Clone();
-          for (int64_t i = 0; i < result.shape().rank(); ++i) {
+          for (int64_t i = 0; i < result.shape().dimensions().size(); ++i) {
             result.SetDynamicSize(i, operands[1 + i]->Get<int32_t>({}));
           }
           return result.ToStatic();
@@ -1120,15 +1133,15 @@ DeviceHandle Service::SingleComputationDeviceHandle() const {
 
 absl::StatusOr<std::vector<se::StreamExecutor*>> Service::Replicas(
     const Backend& backend, const DeviceHandle& device_handle) const {
+  TF_ASSIGN_OR_RETURN(
+      DeviceAssignment da,
+      backend.computation_placer()->AssignDevices(
+          options_.number_of_replicas(), device_handle.device_count()));
   std::vector<se::StreamExecutor*> replicas;
   for (int replica = 0; replica < options_.number_of_replicas(); ++replica) {
     // From the computation placer, find out the device ids of the replicas for
     // the given device handle.
-    TF_ASSIGN_OR_RETURN(
-        int device_ordinal,
-        backend.computation_placer()->DeviceId(replica, device_handle.handle(),
-                                               options_.number_of_replicas(),
-                                               device_handle.device_count()));
+    int64_t device_ordinal = da.DeviceId(replica, device_handle.handle());
     TF_ASSIGN_OR_RETURN(auto executor, backend.stream_executor(device_ordinal));
     replicas.push_back(executor);
   }

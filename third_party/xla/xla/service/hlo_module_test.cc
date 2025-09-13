@@ -29,13 +29,18 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/comparison_util.h"
 #include "xla/debug_options_flags.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_original_value.h"
+#include "xla/hlo/ir/hlo_print_options.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/test.h"
 #include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/hlo/transforms/simplifiers/hlo_memory_scheduler.h"
 #include "xla/hlo/utils/hlo_matchers.h"
@@ -46,11 +51,10 @@ limitations under the License.
 #include "xla/service/test_compilation_environment.pb.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/test.h"
-#include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/lib/strings/proto_serialization.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/tuple_tree.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/casts.h"
@@ -75,7 +79,7 @@ namespace {
 
 namespace op = ::xla::testing::opcode_matchers;
 
-class HloModuleTest : public HloTestBase {
+class HloModuleTest : public HloHardwareIndependentTestBase {
  protected:
   static void SetUpTestSuite() {
     CompilationEnvironments::RegisterProcessNewEnvFn(
@@ -248,8 +252,8 @@ ENTRY entry () -> s32[] {
   HloInstruction* cloned_custom_call =
       cloned_module->entry_computation()->GetInstructionWithName("custom-call");
 
-  EXPECT_TRUE(cloned_computation->IsCustomCallComputation());
-  EXPECT_EQ(cloned_computation->CustomCallInstruction(), cloned_custom_call);
+  EXPECT_EQ(cloned_computation->GetUniqueCaller(HloOpcode::kCustomCall),
+            cloned_custom_call);
 }
 
 TEST_F(HloModuleTest, CloneCustomCallComputationCalledComputations) {
@@ -288,10 +292,10 @@ ENTRY entry () -> s32[] {
   HloInstruction* cloned_custom_call =
       cloned_module->entry_computation()->GetInstructionWithName("custom-call");
 
-  EXPECT_TRUE(cloned_computation_0->IsCustomCallComputation());
-  EXPECT_EQ(cloned_computation_0->CustomCallInstruction(), cloned_custom_call);
-  EXPECT_TRUE(cloned_computation_1->IsCustomCallComputation());
-  EXPECT_EQ(cloned_computation_1->CustomCallInstruction(), cloned_custom_call);
+  EXPECT_EQ(cloned_computation_0->GetUniqueCaller(HloOpcode::kCustomCall),
+            cloned_custom_call);
+  EXPECT_EQ(cloned_computation_1->GetUniqueCaller(HloOpcode::kCustomCall),
+            cloned_custom_call);
 }
 
 TEST_F(HloModuleTest, CloneFusionComputation) {
@@ -465,7 +469,8 @@ ENTRY ReduceR3ToR2.v3 {
   auto size_fn = [](const BufferValue& buffer) {
     return ShapeUtil::ByteSizeOf(buffer.shape());
   };
-  HloMemoryScheduler scheduler(size_fn);
+  AliasInfo alias_info;
+  HloMemoryScheduler scheduler(&alias_info, size_fn);
   TF_ASSERT_OK(scheduler.Run(module.get()).status());
   ASSERT_TRUE(module->has_schedule());
 
@@ -504,13 +509,19 @@ ENTRY ReduceR3ToR2.v3 {
     }
   }
 
-  // Verify that the next unique ID which the module would have handed out is
-  // greater than the unique id of any instruction.
-  int next_id = module_copy->NewUniqueInstructionId();
+  // Verify that the next unique ID which any computation would have handed out
+  // is greater than the unique id of any existing instruction in that
+  // computation.
+  int32_t next_module_unique_id = module->next_unique_computation_id();
   for (const HloComputation* computation : module_copy->computations()) {
+    int32_t next_instruction_id_internal =
+        computation->next_unique_instruction_internal_id();
     for (const HloInstruction* instruction : computation->instructions()) {
-      EXPECT_GT(next_id, instruction->unique_id());
+      EXPECT_GT(next_instruction_id_internal, instruction->local_id());
     }
+    // Also verify that the next module unique id is greater than the module
+    // unique ids already present in the computation.
+    EXPECT_GT(next_module_unique_id, computation->unique_id());
   }
 }
 
@@ -765,8 +776,7 @@ ENTRY ReduceR3ToR2.v3 {
   xla::HloModuleProtoWithConfig proto = module->ToProtoWithConfig();
   std::string serialized_module;
   ASSERT_TRUE(tsl::SerializeToStringDeterministic(proto, &serialized_module));
-  std::string original_debug_str = proto.DebugString();
-  RecordProperty("serialized_module", original_debug_str);
+  RecordProperty("serialized_module", proto.DebugString());
 
   // Verify that we can create a module from our parsed proto copy
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> reconstructed_module,
@@ -970,10 +980,9 @@ TEST_F(HloModuleTest, PrintOriginalValue) {
   std::vector<float> values(16, 42.0);
   auto instruction =
       HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(42.0f));
-  auto original_value = std::make_shared<OriginalValue>(instruction->shape());
-  for (auto& leaf : original_value->leaves()) {
-    leaf.second = {std::string(instruction->name()), leaf.first};
-  }
+  auto original_value =
+      std::make_shared<OriginalValue>(TupleTree<std::optional<OriginalArray>>(
+          OriginalArray{std::string(instruction->name()), {}}));
   instruction->set_original_value(original_value);
   builder.AddInstruction(std::move(instruction));
   module->AddEntryComputation(builder.Build());

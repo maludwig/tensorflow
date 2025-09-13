@@ -3,6 +3,7 @@ load(
     "@local_xla//xla/tsl/platform:build_config.bzl",
     "tf_proto_library",
 )
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.bzl", "if_google", "tf_cc_test")
 
 package(
@@ -20,10 +21,8 @@ package_group(
     ] + if_google([
         "//learning/brain/tfrt/cpp_tests/...",
         "//learning/serving/servables/tfrt/...",
-        "//learning/pathways/serving/runtime/...",
-        "//learning/pathways/serving/tests/...",
         "//learning/brain/tfrt/ifrt/...",
-        "//learning/brain/tfrt/mlir/mlrt/application/pathways/compiler/...",
+        "//learning/brain/tfrt/tfrt_session/...",
         # Allow visibility from the mlir language server.
         "//learning/brain/mlir/mlir_lsp_server/...",
         "//learning/infra/mira/experimental/orbax_model/serving/sidecar/...",
@@ -33,15 +32,10 @@ package_group(
 
 gentbl_cc_library(
     name = "pass_inc_gen",
-    tbl_outs = [
-        (
-            [
-                "-gen-pass-decls",
-                "-name=TfrtIfrtServing",
-            ],
-            "passes.h.inc",
-        ),
-    ],
+    tbl_outs = {"passes.h.inc": [
+        "-gen-pass-decls",
+        "-name=TfrtIfrtServing",
+    ]},
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "passes.td",
     deps = [
@@ -218,10 +212,9 @@ tf_cc_test(
         "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
+        "@llvm-project//mlir:RegisterAllDialects",  # buildcleaner: keep
         "@local_tsl//tsl/platform:protobuf",
-        "@local_xla//xla/pjrt:pjrt_client",
         "@local_xla//xla/pjrt:pjrt_compiler",
-        "@local_xla//xla/pjrt/gpu:se_gpu_pjrt_client",
         "@local_xla//xla/pjrt/plugin/xla_cpu:cpu_topology_description",
         "@local_xla//xla/python/ifrt",
         "@local_xla//xla/python/ifrt:mock",
@@ -229,6 +222,7 @@ tf_cc_test(
         "@local_xla//xla/python/pjrt_ifrt",
         "@local_xla//xla/python/pjrt_ifrt:tfrt_cpu_client_test_lib",
         "@local_xla//xla/service:computation_placer_hdr",
+        "@local_xla//xla/tsl/platform:statusor",
     ],
 )
 
@@ -291,6 +285,7 @@ tf_cc_test(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
+        "@llvm-project//mlir:RegisterAllDialects",
         "@local_xla//xla/python/ifrt",
         "@local_xla//xla/python/ifrt:test_util",
         "@local_xla//xla/python/pjrt_ifrt:tfrt_cpu_client_test_lib",

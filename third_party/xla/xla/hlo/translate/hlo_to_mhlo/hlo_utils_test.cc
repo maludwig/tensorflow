@@ -19,12 +19,14 @@ limitations under the License.
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "absl/strings/string_view.h"
+#include "llvm/ADT/StringRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Support/DebugStringHelper.h"
-#include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
+#include "stablehlo/dialect/StablehloOps.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
@@ -34,7 +36,7 @@ namespace {
 
 TEST(ConvertTensorShapeToType, Simple) {
   mlir::MLIRContext context;
-  context.loadDialect<mlir::mhlo::MhloDialect>();
+  context.loadDialect<mlir::stablehlo::StablehloDialect>();
   mlir::Builder builder(&context);
 
   // Static shape.
@@ -59,13 +61,25 @@ TEST(ConvertTensorShapeToType, Simple) {
         ConvertTensorShapeToType<mlir::RankedTensorType>(shape, builder));
 
     int64_t bounds[] = {8, mlir::ShapedType::kDynamic};
-    auto extensions = mlir::mhlo::TypeExtensionsAttr::get(&context, bounds);
+    auto extensions =
+        mlir::stablehlo::TypeExtensionsAttr::get(&context, bounds);
     auto expected = mlir::RankedTensorType::get(
         {mlir::ShapedType::kDynamic, 128}, builder.getI32Type(), extensions);
     EXPECT_TRUE(type == expected)
         << " Expected: " << mlir::debugString(expected)
         << " Computed: " << mlir::debugString(type);
   }
+}
+
+TEST(StringRefToStringView, Conversion) {
+  absl::string_view sv = "hello";
+  llvm::StringRef sref = ToStringRef(sv);
+  EXPECT_EQ(sref.data(), sv.data());
+  EXPECT_EQ(sref.size(), sv.size());
+
+  absl::string_view sv2 = ToStringView(sref);
+  EXPECT_EQ(sv2.data(), sref.data());
+  EXPECT_EQ(sv2.size(), sref.size());
 }
 
 }  // namespace

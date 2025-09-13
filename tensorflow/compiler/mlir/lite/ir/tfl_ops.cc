@@ -81,10 +81,10 @@ limitations under the License.
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/FoldUtils.h"  // from @llvm-project
 #include "mlir/Transforms/InliningUtils.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/lite/quantization/common/quantization_lib/quantization_traits.h"
 #include "tensorflow/compiler/mlir/lite/utils/arithmetic_count_util.h"
 #include "tensorflow/compiler/mlir/lite/utils/shape_and_size_utils.h"
 #include "tensorflow/compiler/mlir/lite/utils/utils.h"
-#include "tensorflow/compiler/mlir/quantization/common/quantization_lib/quantization_traits.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_op_interfaces.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops_a_m.h"
@@ -104,7 +104,6 @@ INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(LocalResponseNormalizationOp);
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(NegOp);
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(RoundOp);
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(SinOp);
-INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(SqrtOp);
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(SquareOp);
 // go/keep-sorted end
 
@@ -195,7 +194,7 @@ DenseElementsAttr GetSqueezedShape(Value value_tensor) {
 // TFL_TransposeOp when the tensor has some dimensions with value==1
 // Example- "tfl.transpose"(tensor<56x8x56x1x1x1x7xf32>, [4, 5, 1, 2, 0, 6, 3])
 // Permutation before squeese is [4, 5, 1, 2, 0, 6, 3] becomes [1, 2, 0, 3]
-// after squeeze is perfomed to retain the relative ordering of the non-1 dims.
+// after squeeze is performed to retain the relative ordering of the non-1 dims.
 DenseElementsAttr GetSqueezedPermutation(Value input_value,
                                          Value input_permutation) {
   auto input_shape =
@@ -252,12 +251,64 @@ bool ShouldFoldOperation(Operation* inst) {
   int64_t operands_size = get_size(inst->getOperandTypes());
 
   constexpr int kSizeFactor = 2;
-  constexpr int64_t kResultsSizeThreshold = (1 << 16);   // 64 Kib =   8 KiB
-  constexpr int64_t kOperandsSizeThreshold = (1 << 30);  //  1 Gib = 128 MiB
+  constexpr int64_t kResultsSizeThreshold = (1 << 19);                // 64 KiB
+  constexpr int64_t kOperandsSizeThreshold = 200L * 1024 * 1024 * 8;  // 200 MiB
 
   return (operands_size <= kOperandsSizeThreshold) &&
          ((results_size <= kResultsSizeThreshold) ||
           (results_size <= kSizeFactor * operands_size));
+}
+
+// Returns dimension index for the given axis that supports negative
+// indexing.
+int64_t NormalizeDim(int64_t axis, int64_t rank) {
+  return axis >= 0 ? axis : axis + rank;
+}
+
+Type InferReductionOpType(Value input, Value reduction_indices,
+                          BoolAttr keep_dims) {
+  Type input_ty = input.getType();
+  Type element_ty = getElementTypeOrSelf(input_ty);
+
+  // Output type is unranked if input type is not ranked.
+  auto ranked_ty = mlir::dyn_cast<RankedTensorType>(input_ty);
+  if (!ranked_ty) return UnrankedTensorType::get(element_ty);
+  int64_t rank = ranked_ty.getRank();
+
+  DenseIntElementsAttr indices;
+  if (!matchPattern(reduction_indices, m_Constant(&indices))) {
+    // Output type is unranked if reduction indices are not constant and reduced
+    // dimensions are not kept.
+    if (!keep_dims.getValue()) return UnrankedTensorType::get(element_ty);
+
+    // Otherwise, output type has same rank as the input.
+    return RankedTensorType::get(
+        SmallVector<int64_t, 4>(rank, ShapedType::kDynamic), element_ty);
+  }
+
+  int64_t num_reduce_dim = 0;
+  llvm::SmallVector<bool, 4> is_reduce_dim(rank, false);
+  for (const APInt& index : indices.getValues<APInt>()) {
+    int64_t dim = NormalizeDim(index.getSExtValue(), rank);
+    // Invalid input.
+    assert(dim >= 0 && dim < rank);
+
+    if (!is_reduce_dim[dim]) {
+      is_reduce_dim[dim] = true;
+      num_reduce_dim++;
+    }
+  }
+
+  ArrayRef<int64_t> shape = ranked_ty.getShape();
+  SmallVector<int64_t, 4> out_shape;
+  out_shape.reserve(rank - (keep_dims.getValue() ? 0 : num_reduce_dim));
+  for (int64_t i = 0; i < rank; ++i) {
+    if (!is_reduce_dim[i])
+      out_shape.push_back(shape[i]);
+    else if (keep_dims.getValue())
+      out_shape.push_back(1);
+  }
+  return RankedTensorType::get(out_shape, element_ty);
 }
 
 #include "tensorflow/compiler/mlir/lite/ir/tfl_canonicalize.inc"
@@ -427,7 +478,7 @@ bool EqualsZero(Value value) {
 
 // Replaces the bias operand with a "none" type value if the bias value is
 // constant zero.
-// `ConcreteOpType` must be an concrete MLIR op class that has an optional
+// `ConcreteOpType` must be a concrete MLIR op class that has an optional
 // bias operand named 'bias'.
 template <typename ConcreteOpType>
 struct RemoveOptionalZeroBias : public OpRewritePattern<ConcreteOpType> {
@@ -939,6 +990,26 @@ int64_t AddOp::GetArithmeticCount(Operation* op) {
 }
 
 //===----------------------------------------------------------------------===//
+// CeilOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult CeilOp::fold(FoldAdaptor adaptor) {
+  if (!ShouldFoldOperation(this->getOperation())) return {};
+
+  auto operands = adaptor.getOperands();
+  auto result_type = getType();
+  if (!IsF32ShapedType(result_type)) return {};
+
+  auto compute = [](APFloat value) -> APFloat {
+    float f = value.convertToFloat();
+    float result = std::ceil(f);
+    return APFloat(result);
+  };
+
+  return ConstFoldUnaryOp(result_type, operands[0], compute);
+}
+
+//===----------------------------------------------------------------------===//
 // FloorOp
 //===----------------------------------------------------------------------===//
 
@@ -1396,6 +1467,82 @@ OpFoldResult GatherOp::fold(GatherOp::FoldAdaptor adaptor) {
 }
 
 //===----------------------------------------------------------------------===//
+// GatherNd op
+//===----------------------------------------------------------------------===//
+
+OpFoldResult GatherNdOp::fold(GatherNdOp::FoldAdaptor adaptor) {
+  auto params = mlir::dyn_cast_or_null<DenseElementsAttr>(adaptor.getParams());
+  auto indices =
+      mlir::dyn_cast_or_null<DenseIntElementsAttr>(adaptor.getIndices());
+
+  if (!params || !indices) {
+    return nullptr;
+  }
+
+  auto params_type = params.getType();
+  auto indices_type = indices.getType();
+  auto params_shape = params_type.getShape();
+  auto indices_shape = indices_type.getShape();
+
+  // The last dimension of 'indices' is the coordinate depth.
+  if (indices_shape.empty()) {
+    return nullptr;  // Invalid indices shape.
+  }
+  int64_t index_depth = indices_shape.back();
+
+  // The index depth cannot exceed the rank of the params tensor.
+  assert(index_depth <= params_shape.size() &&
+         "Index depth cannot be greater than params rank.");
+
+  // Calculate the output shape.
+  // output_shape = indices_shape[:-1] + params_shape[index_depth:]
+  llvm::SmallVector<int64_t> output_shape;
+  output_shape.append(indices_shape.begin(), indices_shape.end() - 1);
+  output_shape.append(params_shape.begin() + index_depth, params_shape.end());
+
+  auto output_type = params_type.clone(output_shape);
+
+  // Calculate the size of each slice we will gather.
+  int64_t slice_size = 1;
+  for (int64_t i = index_depth; i < params_shape.size(); ++i) {
+    slice_size *= params_shape[i];
+  }
+
+  // Prepare for the gathering logic.
+  auto params_values = params.getValues<mlir::Attribute>();
+  auto indices_values_it = indices.getValues<mlir::APInt>().begin();
+  std::vector<mlir::Attribute> result_values;
+  result_values.reserve(output_type.getNumElements());
+
+  const int64_t num_indices = indices.getNumElements() / index_depth;
+
+  // Implement the core gathering logic.
+  for (int64_t i = 0; i < num_indices; ++i) {
+    // For each output element, first find the N-d coordinate from 'indices'.
+    uint64_t linear_index = 0;
+    for (int64_t j = 0; j < index_depth; ++j) {
+      // Read the coordinate value and advance the iterator.
+      uint64_t coord = (*indices_values_it++).getZExtValue();
+
+      // Convert the N-d coordinate into a linear index for the slice.
+      // This is equivalent to: linear_index = (linear_index * params_shape[0] +
+      // c_0) * params_shape[1] + c_1 ...
+      linear_index = linear_index * params_shape[j] + coord;
+    }
+
+    // The start of the slice in the flattened 'params' buffer.
+    uint64_t slice_start_offset = linear_index * slice_size;
+
+    // Copy the entire slice into the result vector.
+    for (int64_t j = 0; j < slice_size; ++j) {
+      result_values.push_back(params_values[slice_start_offset + j]);
+    }
+  }
+
+  return mlir::DenseElementsAttr::get(output_type, result_values);
+}
+
+//===----------------------------------------------------------------------===//
 // BroadcastToOp
 //===----------------------------------------------------------------------===//
 
@@ -1529,7 +1676,7 @@ LogicalResult FullyConnectedOp::verify() {
 
   // Input's element size must be multiple of parameter's z_in dimension.
   const int z_in = filter_type.getDimSize(1);
-  const int num_input_elements = input_type.getNumElements();
+  const int64_t num_input_elements = input_type.getNumElements();
   if (z_in != 0 && num_input_elements % z_in != 0) {
     return op.emitOpError(llvm::formatv(
                "expect 'input' num_elements % {0} == 0, got input type ", z_in))
@@ -1545,7 +1692,7 @@ LogicalResult FullyConnectedOp::verify() {
       return mlir::success();
     }
 
-    const int num_output_elements = output_type.getNumElements();
+    const int64_t num_output_elements = output_type.getNumElements();
     const int z_out = filter_type.getDimSize(0);
     if (num_output_elements % z_out != 0) {
       return op.emitOpError(llvm::formatv(
@@ -1576,11 +1723,20 @@ LogicalResult FullyConnectedOp::fold(FoldAdaptor adaptor,
       !(!getBias() || mlir::isa<NoneType>(getBias().getType()));
 
   // Get the tensors.
-  DenseElementsAttr input_tensor, weights_tensor, bias_tensor;
-  if (!matchPattern(getInput(), m_Constant(&input_tensor)) ||
-      !matchPattern(getFilter(), m_Constant(&weights_tensor)) ||
-      (has_bias && !matchPattern(getBias(), m_Constant(&bias_tensor)))) {
+  auto operands = adaptor.getOperands();
+  DenseElementsAttr input_tensor =
+      dyn_cast_or_null<DenseElementsAttr>(operands[0]);
+  DenseElementsAttr weights_tensor =
+      dyn_cast_or_null<DenseElementsAttr>(operands[1]);
+  DenseElementsAttr bias_tensor;
+
+  if (!input_tensor || !weights_tensor) {
     return failure();
+  }
+
+  if (has_bias) {
+    bias_tensor = dyn_cast_or_null<DenseElementsAttr>(operands[2]);
+    if (!bias_tensor) return failure();
   }
 
   // Get the tensor types.
@@ -1605,58 +1761,60 @@ LogicalResult FullyConnectedOp::fold(FoldAdaptor adaptor,
     return failure();
   }
 
-  auto is_foldable = [](llvm::ArrayRef<int64_t> shape) {
-    return shape.size() == 1 || (shape.size() == 2 && shape.front() == 1);
-  };
-
-  const bool weights_foldable = weights_type.getShape().size() == 2;
-  const bool bias_foldable = !has_bias || is_foldable(bias_type.getShape());
-
-  // Folding only implemented for 1D input, 2D weights and 1D bias
-  if (!is_foldable(input_type.getShape()) || !bias_foldable ||
-      !weights_foldable) {
+  if (weights_type.getRank() != 2) {
     return failure();
   }
 
-  // Get the sizes
-  const auto input_size = input_type.getNumElements();
-  const auto output_size = output_type.getNumElements();
+  const int64_t in_dim = weights_type.getDimSize(1);
+  const int64_t out_dim = weights_type.getDimSize(0);
 
-  // Get iterators to the tensors.
-  const auto input_values_it = input_tensor.getValues<float>().begin();
-  const auto weights_values_ptr = weights_tensor.getValues<float>().begin();
-  auto weights_row_it = weights_values_ptr;
-  // The 'else' case could be nullptr, but the types don't match.
-  auto bias_values_it =
-      has_bias ? bias_tensor.getValues<float>().begin() : input_values_it;
+  if (has_bias) {
+    if (bias_type.getRank() > 2 ||
+        (bias_type.getRank() == 2 && bias_type.getDimSize(0) != 1) ||
+        bias_type.getNumElements() != out_dim) {
+      return failure();
+    }
+  }
+
+  const int64_t batch_size = input_type.getNumElements() / in_dim;
+
+  if (output_type.getNumElements() != batch_size * out_dim) {
+    return failure();
+  }
+
+  auto input_values_range = input_tensor.getValues<float>();
+  auto weights_values_range = weights_tensor.getValues<float>();
+  std::optional<decltype(input_values_range)> bias_values_range;
+  if (has_bias) bias_values_range = bias_tensor.getValues<float>();
 
   // Do the actual folding, one output at a time.
   std::vector<float> result_values;
-  result_values.reserve(output_size);
+  result_values.reserve(batch_size * out_dim);
 
-  for (int i = 0; i < output_size; ++i) {
-    // Dot product with Kahan/Neumaier summation to minimize numeric errors.
-    float sum = has_bias ? *bias_values_it : 0.0f;
-    float compensation = 0.0f;
-    for (int j = 0; j < input_size; ++j) {
-      const float addend = input_values_it[j] * weights_row_it[j];
-      const float new_sum = sum + addend;
-      // DO NOT enable -funsafe-math-optimizations here.
-      // There is a test detecting unsafe optimizations.
-      // Unsafe math optimizations can reorder float formulas, and set the
-      // compensation to constant 0. The formula must be evaluated as written
-      // for the algorithm to work.
-      // (Note: -ffast-math is a superset of -funsafe-math-optimizations.)
-      if (std::abs(sum) >= std::abs(addend)) {
-        compensation += (sum - new_sum) + addend;
-      } else {
-        compensation += (addend - new_sum) + sum;
+  for (int b = 0; b < batch_size; ++b) {
+    for (int o = 0; o < out_dim; ++o) {
+      // Dot product with Kahan/Neumaier summation to minimize numeric errors.
+      float sum = has_bias ? (*bias_values_range)[o] : 0.0f;
+      float compensation = 0.0f;
+      for (int i = 0; i < in_dim; ++i) {
+        const float addend = input_values_range[b * in_dim + i] *
+                             weights_values_range[o * in_dim + i];
+        const float new_sum = sum + addend;
+        // DO NOT enable -funsafe-math-optimizations here.
+        // There is a test detecting unsafe optimizations.
+        // Unsafe math optimizations can reorder float formulas, and set the
+        // compensation to constant 0. The formula must be evaluated as written
+        // for the algorithm to work.
+        // (Note: -ffast-math is a superset of -funsafe-math-optimizations.)
+        if (std::abs(sum) >= std::abs(addend)) {
+          compensation += (sum - new_sum) + addend;
+        } else {
+          compensation += (addend - new_sum) + sum;
+        }
+        sum = new_sum;
       }
-      sum = new_sum;
+      result_values.push_back(sum + compensation);
     }
-    result_values.push_back(sum + compensation);
-    weights_row_it += input_size;
-    bias_values_it++;
   }
 
   // Set result tensor
@@ -2230,21 +2388,18 @@ namespace {
 // * The input's defining op is another tfl.reshape.
 // TODO(antiagainst): This pattern probably should be moved to the peephole
 // category, after we have the infra for peephole passes.
-struct RemoveAdjacentReshape : public RewritePattern::SplitMatchAndRewrite {
+struct RemoveAdjacentReshape : public RewritePattern {
   explicit RemoveAdjacentReshape(MLIRContext* context)
-      : RewritePattern::SplitMatchAndRewrite(ReshapeOp::getOperationName(), 1,
-                                             context) {}
+      : RewritePattern(ReshapeOp::getOperationName(), 1, context) {}
 
-  LogicalResult match(Operation* op) const override {
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
     auto thisOp = cast<ReshapeOp>(op);
-    auto prevOp = thisOp.getOperand(0).getDefiningOp();
-    return isa_and_nonnull<ReshapeOp>(prevOp) ? success() : failure();
-  }
-
-  void rewrite(Operation* op, PatternRewriter& rewriter) const override {
-    auto thisOp = cast<ReshapeOp>(op);
-    auto prevOp = cast<ReshapeOp>(thisOp.getOperand(0).getDefiningOp());
-
+    auto prevOp =
+        dyn_cast_or_null<ReshapeOp>(thisOp.getOperand(0).getDefiningOp());
+    if (!prevOp) {
+      return failure();
+    }
     // Replace
     //   %1 = "tfl.reshape"(%0, %shape0)
     //   %2 = "tfl.reshape"(%1, %shape1)
@@ -2252,6 +2407,7 @@ struct RemoveAdjacentReshape : public RewritePattern::SplitMatchAndRewrite {
     //   %2 = "tfl.reshape"(%0, %shape1)
     rewriter.replaceOpWithNewOp<ReshapeOp>(
         op, thisOp.getType(), prevOp.getOperand(0), thisOp.getOperand(1));
+    return success();
   }
 };
 
@@ -2963,12 +3119,12 @@ namespace {
 
 /// This pattern matches and remove a tfl.fake_quant if all the users of this op
 /// and itself have "minmax" attribute set.
-struct DropFakeQuant : public RewritePattern::SplitMatchAndRewrite {
+struct DropFakeQuant : public RewritePattern {
   explicit DropFakeQuant(MLIRContext* context)
-      : RewritePattern::SplitMatchAndRewrite(FakeQuantOp::getOperationName(), 1,
-                                             context) {}
+      : RewritePattern(FakeQuantOp::getOperationName(), 1, context) {}
 
-  LogicalResult match(Operation* op) const override {
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
     // We only match the op with valid "minmax" attribute.
     if (!HasValidMinMaxAttribute(op)) return failure();
 
@@ -2978,12 +3134,9 @@ struct DropFakeQuant : public RewritePattern::SplitMatchAndRewrite {
     for (auto* operand : fakeQuantOp.getResult().getUsers())
       if (!HasValidMinMaxAttribute(operand)) return failure();
 
-    return success();
-  }
-
-  void rewrite(Operation* op, PatternRewriter& rewriter) const override {
     // Replace the matched FakeQuantOp by its primary operand.
     rewriter.replaceOp(op, op->getOperand(0));
+    return success();
   }
 };
 }  // end anonymous namespace
@@ -4041,6 +4194,12 @@ OpFoldResult SumOp::fold(FoldAdaptor adaptor) {
   return DenseFPElementsAttr::get(out_type, out_data);
 }
 
+void SumOp::build(OpBuilder& builder, OperationState& result, Value input,
+                  Value axes, BoolAttr keep_dims) {
+  Type out_ty = InferReductionOpType(input, axes, keep_dims);
+  build(builder, result, out_ty, input, axes, keep_dims);
+}
+
 //===----------------------------------------------------------------------===//
 // RankOp
 //===----------------------------------------------------------------------===//
@@ -4447,6 +4606,27 @@ int64_t TransposeConvOp::GetArithmeticCount(Operation* op) {
 // StridedSliceOp
 //===----------------------------------------------------------------------===//
 
+bool VerifyStridedSliceOpInputRankConstraints(StridedSliceOp op) {
+  auto ranked_input_type =
+      mlir::dyn_cast<RankedTensorType>(op.getInput().getType());
+
+  // If input is unranked, there is nothing else to be verified.
+  if (!ranked_input_type) return true;
+  const int num_input_dims = ranked_input_type.getRank();
+
+  // The kernel will reshape the input tensor with new axis, it only supports
+  // this reshaped tensor up to 6D.
+  const uint32_t ellipsis_mask = op.getEllipsisMask();
+  const uint32_t new_axis_mask = op.getNewAxisMask();
+  int num_added_axis = 0;
+  for (int i = 0; i < 8; ++i) {
+    if (!((1 << i) & ellipsis_mask) && ((1 << i) & new_axis_mask)) {
+      num_added_axis++;
+    }
+  }
+  return (num_input_dims + num_added_axis <= 6);
+}
+
 LogicalResult StridedSliceOp::verify() {
   StridedSliceOp op = *this;
   auto ranked_input_type =
@@ -4473,17 +4653,6 @@ LogicalResult StridedSliceOp::verify() {
     if (strides_type.getDimSize(0) > num_input_dims) return failure();
   }
 
-  // The kernel will reshape the input tensor with new axis, it only supports
-  // this reshaped tensor up to 5D.
-  uint32_t ellipsis_mask = op.getEllipsisMask();
-  uint32_t new_axis_mask = op.getNewAxisMask();
-  int num_added_axis = 0;
-  for (int i = 0; i < 8; ++i) {
-    if (!((1 << i) & ellipsis_mask) && ((1 << i) & new_axis_mask)) {
-      num_added_axis++;
-    }
-  }
-  if (num_input_dims + num_added_axis > 5) return failure();
   return success();
 }
 

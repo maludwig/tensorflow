@@ -19,6 +19,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/collective_rma_local.h"
 #include "tensorflow/core/common_runtime/collective_util.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
@@ -320,7 +321,7 @@ void HierarchicalTreeBroadcaster::RunTree() {
           [&] { return strings::StrCat("ReceiveValue:", si); },
           tsl::profiler::TraceMeLevel::kInfo);
       int recv_from_rank = TreeRecvFrom(*col_params_, si);
-      Notification note;
+      absl::Notification note;
       DispatchRecv(si, recv_from_rank, my_rank, col_ctx_->output,
                    [this, &mu, &note](const absl::Status& s) {
                      mutex_lock l(mu);
@@ -410,8 +411,7 @@ void HierarchicalTreeBroadcaster::DispatchSend(int subdiv, int dst_rank,
                                                const Tensor* src_tensor,
                                                const StatusCallback& done) {
   tsl::profiler::ScopedMemoryDebugAnnotation op_annotation(
-      col_params_->name.data(), col_ctx_->step_id, "dynamic",
-      src_tensor->dtype(),
+      col_params_->name, col_ctx_->step_id, "dynamic", src_tensor->dtype(),
       [src_tensor]() { return src_tensor->shape().DebugString(); });
   string send_buf_key =
       BroadcastBufKey(col_ctx_->exec_key, subdiv, src_rank, dst_rank);

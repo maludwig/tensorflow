@@ -58,10 +58,13 @@ tf_cc_shared_test(
     tags = ["no_oss"],
     deps = [
         ":runtime",
+        ":work_queue_interface",
         "//tensorflow/c:tf_tensor",
         "//tensorflow/core:test",
+        "//tensorflow/core/platform:threadpool_interface",
+        "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
-        "@tf_runtime//cpp_tests:common",
+        "@tf_runtime//:hostcontext",
     ],
 )
 
@@ -112,7 +115,6 @@ cc_library(
         "//tensorflow/core/tfrt/utils:thread_pool",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/status:statusor",
-        "@llvm-project//llvm:Support",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
     ],
@@ -186,14 +188,11 @@ tf_cc_test(
     deps = [
         ":tf_threadpool_concurrent_work_queue",
         "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:status_matchers",
         "//tensorflow/core/tfrt/utils:thread_pool",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",

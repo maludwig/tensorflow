@@ -35,6 +35,7 @@ limitations under the License.
 #include "xla/backends/cpu/runtime/thunk.pb.h"
 #include "xla/backends/cpu/runtime/thunk_proto_serdes.h"
 #include "xla/cpu_function_runtime.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/service/buffer_assignment.h"
@@ -58,12 +59,14 @@ using BufferInfo = cpu_function_runtime::BufferInfo;
 
 CpuAotCompilationOptions::CpuAotCompilationOptions(
     std::string triple, std::string cpu_name, std::string features,
-    std::string entry_point_name, RelocationModel relocation_model)
+    std::string entry_point_name, RelocationModel relocation_model,
+    bool compile_copy_as_llvm_kernel)
     : triple_(std::move(triple)),
       cpu_name_(std::move(cpu_name)),
       features_(std::move(features)),
       entry_point_name_(std::move(entry_point_name)),
-      relocation_model_(relocation_model) {}
+      relocation_model_(relocation_model),
+      compile_copy_as_llvm_kernel_(compile_copy_as_llvm_kernel) {}
 
 CpuAotCompilationOptions::~CpuAotCompilationOptions() = default;
 
@@ -71,29 +74,10 @@ se::Platform::Id CpuAotCompilationOptions::PlatformId() const {
   return se::host::kHostPlatformId;
 }
 
-CpuAotCompilationResultLegacy::CpuAotCompilationResultLegacy(
-    ObjectFileData object_file_data, std::vector<BufferInfo> buffer_infos,
-    int64_t result_buffer_index, std::unique_ptr<HloModule> module,
-    std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data)
-    : object_file_data_(std::move(object_file_data)),
-      buffer_infos_(std::move(buffer_infos)),
-      result_buffer_index_(result_buffer_index),
-      module_(std::move(module)),
-      hlo_profile_printer_data_(std::move(hlo_profile_printer_data)) {}
-
-const HloModule* CpuAotCompilationResultLegacy::optimized_module() const {
-  return module_.get();
-}
-
-std::unique_ptr<HloModule>
-CpuAotCompilationResultLegacy::consume_optimized_module() {
-  return std::move(module_);
-}
-
-/*static*/ absl::StatusOr<std::unique_ptr<CpuAotCompilationResultThunks>>
-CpuAotCompilationResultThunks::Create(
+/*static*/ absl::StatusOr<std::unique_ptr<CpuAotCompilationResult>>
+CpuAotCompilationResult::Create(
     const HloModule* hlo_module, const BufferAssignment* buffer_assignment,
-    absl::string_view function_name, std::vector<std::string> obj_files,
+    absl::string_view function_name, std::vector<ObjFileProto> obj_files,
     std::vector<SymbolProto> symbols, const ThunkSequence& thunks,
     FunctionLibrary* function_library,
     std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data) {
@@ -121,16 +105,16 @@ CpuAotCompilationResultThunks::Create(
     }
   }
 
-  return absl::WrapUnique(new CpuAotCompilationResultThunks(
+  return absl::WrapUnique(new CpuAotCompilationResult(
       hlo_module, buffer_assignment, function_name, std::move(obj_files),
       std::move(symbols), thunk_proto, std::move(temp_allocation_index),
       std::move(buffer_infos), std::move(function_library),
       std::move(hlo_profile_printer_data)));
 }
 
-CpuAotCompilationResultThunks::CpuAotCompilationResultThunks(
+CpuAotCompilationResult::CpuAotCompilationResult(
     const HloModule* hlo_module, const BufferAssignment* buffer_assignment,
-    absl::string_view function_name, std::vector<std::string> obj_files,
+    absl::string_view function_name, std::vector<ObjFileProto> obj_files,
     std::vector<SymbolProto> symbols, const ThunkSequenceProto& thunks,
     std::optional<size_t> temp_allocation_index,
     std::vector<cpu_function_runtime::BufferInfo> buffer_infos,
@@ -145,8 +129,8 @@ CpuAotCompilationResultThunks::CpuAotCompilationResultThunks(
       hlo_module->config().ToProto();
   *proto_.mutable_buffer_assignment() = buffer_assignment->ToProto();
   proto_.set_entry_function_name(std::string(function_name));
-  for (std::string& obj_file : obj_files) {
-    proto_.add_obj_files(std::move(obj_file));
+  for (ObjFileProto& obj_file : obj_files) {
+    *proto_.add_object_files() = std::move(obj_file);
   }
 
   for (const auto& symbol : symbols) {
@@ -162,7 +146,7 @@ CpuAotCompilationResultThunks::CpuAotCompilationResultThunks(
 }
 
 absl::StatusOr<std::unique_ptr<Executable>>
-CpuAotCompilationResultThunks::LoadExecutable(
+CpuAotCompilationResult::LoadExecutable(
     [[maybe_unused]] Compiler* compiler,
     const se::StreamExecutor* stream_exec) const&& {
   // Compiler would be used only to get the BufferSizeBytesFunction. Doing this
@@ -185,11 +169,11 @@ CpuAotCompilationResultThunks::LoadExecutable(
       }();
 
   // Recreate BufferAssignment from proto.
-  TF_ASSIGN_OR_RETURN(
-      std::unique_ptr<BufferAssignment> buffer_assignment,
-      BufferAssignment::FromProto(proto_.buffer_assignment(), module.get(),
-                                  buffer_size_bytes_function_getter,
-                                  /*can_share_buffer=*/nullptr));
+  AliasInfo alias_info;
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<BufferAssignment> buffer_assignment,
+                      BufferAssignment::FromProto(
+                          proto_.buffer_assignment(), module.get(),
+                          buffer_size_bytes_function_getter, &alias_info));
 
   std::unique_ptr<CpuExecutable> cpu_executable;
 

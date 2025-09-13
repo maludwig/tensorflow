@@ -71,7 +71,8 @@ ConstBytesAttr CreateListReserveOptions(MLIRContext* context,
 }
 
 std::optional<Type> GetSingularVariantBaseType(Value val) {
-  auto val_t = mlir::getElementTypeOrSelf(val).dyn_cast_or_null<VariantType>();
+  auto val_t = llvm::dyn_cast_or_null<mlir::tf_type::VariantType>(
+      mlir::getElementTypeOrSelf(val));
   if (!val_t) {
     return std::nullopt;
   }
@@ -107,11 +108,13 @@ std::optional<ConstBytesAttr> CustomOptions(MLIRContext* context,
 
 bool HasVariantInputOrOutput(Operation* op) {
   const bool has_variant_input = llvm::any_of(op->getOperands(), [](Value val) {
-    return val.getType().cast<TensorType>().getElementType().isa<VariantType>();
+    return llvm::isa<VariantType>(
+        llvm::cast<mlir::TensorType>(val.getType()).getElementType());
   });
   const bool has_variant_output =
       llvm::any_of(op->getResultTypes(), [](Type t) {
-        return t.cast<TensorType>().getElementType().isa<VariantType>();
+        return llvm::isa<VariantType>(
+            llvm::cast<mlir::TensorType>(t).getElementType());
       });
   return has_variant_input || has_variant_output;
 }
@@ -139,8 +142,8 @@ struct ConvertTensorListPopBack
                                 PatternRewriter& rewriter) const override {
     // It is currently not possible to easily pack the output of a multi-result
     // op into an op with a single varidic output in `.td`.
-    auto converted = rewriter.create<TFL::CustomOp>(
-        op->getLoc(), op->getResultTypes(), op->getOperands(),
+    auto converted = TFL::CustomOp::create(
+        rewriter, op->getLoc(), op->getResultTypes(), op->getOperands(),
         "TensorListPopBack", TFL::ConstBytesAttr::get(getContext(), ""));
     rewriter.replaceOp(op, converted.getResults());
     return success();
@@ -155,8 +158,8 @@ struct ConvertTensorListPushBack
                                 PatternRewriter& rewriter) const override {
     // It is currently not possible to easily pack the output of a multi-result
     // op into an op with a single varidic output in `.td`.
-    auto converted = rewriter.create<TFL::CustomOp>(
-        op->getLoc(), op->getResultTypes(), op->getOperands(),
+    auto converted = TFL::CustomOp::create(
+        rewriter, op->getLoc(), op->getResultTypes(), op->getOperands(),
         "TensorListPushBack", TFL::ConstBytesAttr::get(getContext(), ""));
     rewriter.replaceOp(op, converted.getResults());
     return success();
@@ -171,9 +174,9 @@ struct ConvertVariantAddNOp : public OpRewritePattern<TF::AddNOp> {
     if (!HasVariantInputOrOutput(op.getOperation())) {
       return failure();
     }
-    auto converted = rewriter.create<TFL::CustomOp>(
-        op->getLoc(), op->getResultTypes(), op->getOperands(), "VariantAddN",
-        TFL::ConstBytesAttr::get(getContext(), ""));
+    auto converted = TFL::CustomOp::create(
+        rewriter, op->getLoc(), op->getResultTypes(), op->getOperands(),
+        "VariantAddN", TFL::ConstBytesAttr::get(getContext(), ""));
     rewriter.replaceOp(op, converted.getResults());
     return success();
   }

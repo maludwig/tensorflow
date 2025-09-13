@@ -111,7 +111,6 @@ class IfrtBackendCompilerTest : public ::testing::Test {
 
 namespace {
 using ::testing::HasSubstr;
-using ::tsl::testing::StatusIs;
 
 struct IfrtBackendCompilerTestParams {
   std::string mlir_file_name;
@@ -172,7 +171,7 @@ TEST_F(IfrtBackendCompilerTest, CompileShallFailAfterModelIsFrozen) {
 
   EXPECT_THAT(
       compiler_.CompileTensorflow(runtime_context_, another_mlir_module.get()),
-      StatusIs(
+      absl_testing::StatusIs(
           absl::StatusCode::kFailedPrecondition,
           HasSubstr("Cannot compile IFRT programs after the model is frozen")));
 }

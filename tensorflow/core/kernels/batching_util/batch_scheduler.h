@@ -41,13 +41,13 @@ limitations under the License.
 
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "tensorflow/core/lib/core/notification.h"
+#include "absl/synchronization/notification.h"
+#include "xla/tsl/platform/criticality.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/types.h"
-#include "tsl/platform/criticality.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace tensorflow {
@@ -345,7 +345,7 @@ class Batch {
   std::atomic<bool> empty_ TF_GUARDED_BY(mu_){true};
 
   // Whether the batch has been closed.
-  Notification closed_;
+  absl::Notification closed_;
 
   // The TracMe context id.
   const uint64 traceme_context_id_;
@@ -538,12 +538,12 @@ size_t Batch<TaskType>::size() const {
 
 template <typename TaskType>
 bool Batch<TaskType>::IsClosed() const {
-  return const_cast<Notification*>(&closed_)->HasBeenNotified();
+  return const_cast<absl::Notification*>(&closed_)->HasBeenNotified();
 }
 
 template <typename TaskType>
 void Batch<TaskType>::WaitUntilClosed() const {
-  const_cast<Notification*>(&closed_)->WaitForNotification();
+  const_cast<absl::Notification*>(&closed_)->WaitForNotification();
 }
 
 template <typename TaskType>

@@ -22,7 +22,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "absl/base/macros.h"
 #include "absl/base/nullability.h"
 #include "absl/log/die_if_null.h"
 #include "absl/log/log.h"
@@ -34,11 +33,9 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/literal.h"
 #include "xla/service/computation_placer.h"
-#include "xla/service/hlo_module_util.h"
 #include "xla/shape.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/protobuf.h"
 
 namespace xla {
 
@@ -81,6 +78,8 @@ class HloRunnerPropertyTag final {
   static constexpr Type kUsingGpuRocm = 1;
   // Indicates that this runner is a CPU runner.
   static constexpr Type kCpu = 2;
+  // Indicates that the runner is using CUDA.
+  static constexpr Type kUsingGpuCuda = 3;
 
  private:
   HloRunnerPropertyTag() = default;
@@ -111,16 +110,16 @@ class OpaqueExecutable {
   // !!! STOP !!!
 
  protected:
-  explicit OpaqueExecutable(absl::Nonnull<const HloRunnerInterface*> creator)
+  explicit OpaqueExecutable(const HloRunnerInterface* absl_nonnull creator)
       : creator_(ABSL_DIE_IF_NULL(creator)) {}
   // Cannot be moved or copied.
   OpaqueExecutable(const OpaqueExecutable&) = default;
   OpaqueExecutable& operator=(const OpaqueExecutable&) = default;
 
   template <typename T>
-  static absl::StatusOr<absl::Nonnull<T*>> TryUnwrap(
+  static absl::StatusOr<T* absl_nonnull> TryUnwrap(
       const HloRunnerInterface& runner,
-      absl::Nonnull<OpaqueExecutable*> const wrapped) {
+      OpaqueExecutable* absl_nonnull const wrapped) {
     static_assert(
         std::is_base_of_v<OpaqueExecutable, T>,
         "TryUnwrap must be used with a subclass of OpaqueExecutable.");
@@ -137,9 +136,9 @@ class OpaqueExecutable {
   }
 
   template <typename T>
-  static absl::StatusOr<absl::Nonnull<const T*>> TryUnwrap(
+  static absl::StatusOr<const T* absl_nonnull> TryUnwrap(
       const HloRunnerInterface& runner,
-      absl::Nonnull<const OpaqueExecutable*> const wrapped) {
+      const OpaqueExecutable* absl_nonnull const wrapped) {
     static_assert(
         std::is_base_of_v<OpaqueExecutable, T>,
         "TryUnwrap must be used with a subclass of OpaqueExecutable.");
@@ -204,9 +203,6 @@ class HloRunnerInterface {
     bool use_threads = false;
   };
 
-  using DeviceShapeRepresentationFn = std::function<Shape(const Shape&)>;
-  using DeviceShapeSizeFn = std::function<int64_t(const Shape&)>;
-
   HloRunnerInterface() = default;
   virtual ~HloRunnerInterface() = default;
 
@@ -221,8 +217,7 @@ class HloRunnerInterface {
   // representation must have been produced by a compiler of the same platform
   // and version as this one.
   virtual absl::StatusOr<std::unique_ptr<OpaqueExecutable>>
-  DeserializeExecutable(
-      absl::Nonnull<const tsl::protobuf::Message*> serialized) const = 0;
+  DeserializeExecutable(absl::string_view serialized) const = 0;
 
   // Same as above, except it takes buffer assignment as input.
   // Note: The default implementation of the API here does not utilize the given
@@ -237,42 +232,18 @@ class HloRunnerInterface {
     return CreateExecutable(std::move(module), run_hlo_passes);
   }
 
-  // Executes the given module with given literals as input and returns the
-  // result as a Literal.
-  //
-  // If run_hlo_passes is false, the module will be executed without Hlo
-  // optimization
-  absl::StatusOr<Literal> Execute(std::unique_ptr<HloModule> module,
-                                  absl::Span<const Literal* const> arguments,
-                                  bool run_hlo_passes = true) {
-    return Execute(std::move(module), arguments, run_hlo_passes, nullptr);
-  }
-
   absl::StatusOr<Literal> Execute(std::unique_ptr<HloModule> module,
                                   absl::Span<const Literal> arguments,
-                                  bool run_hlo_passes = true,
-                                  ExecutionProfile* profile = nullptr);
+                                  bool run_hlo_passes = true);
 
   virtual absl::StatusOr<Literal> Execute(
       std::unique_ptr<HloModule> module,
-      absl::Span<const Literal* const> arguments, bool run_hlo_passes,
-      ExecutionProfile* profile) = 0;
-
-  // Same as above 3 methods, but with buffer assignment specified.
-  absl::StatusOr<Literal> ExecuteWithBufferAssignment(
-      std::unique_ptr<HloModule> module,
-      const BufferAssignmentProto* buffer_assignment_proto,
-      absl::Span<const Literal* const> arguments, bool run_hlo_passes = true) {
-    return ExecuteWithBufferAssignment(std::move(module),
-                                       buffer_assignment_proto, arguments,
-                                       run_hlo_passes, nullptr);
-  }
+      absl::Span<const Literal* const> arguments, bool run_hlo_passes) = 0;
 
   absl::StatusOr<Literal> ExecuteWithBufferAssignment(
       std::unique_ptr<HloModule> module,
       const BufferAssignmentProto* buffer_assignment_proto,
-      absl::Span<const Literal> arguments, bool run_hlo_passes = true,
-      ExecutionProfile* profile = nullptr);
+      absl::Span<const Literal> arguments, bool run_hlo_passes = true);
 
   // Note: The default implementation of the API here does not utilize the given
   // buffer assignment. A derived runner interface is expected to override the
@@ -280,26 +251,30 @@ class HloRunnerInterface {
   virtual absl::StatusOr<Literal> ExecuteWithBufferAssignment(
       std::unique_ptr<HloModule> module,
       const BufferAssignmentProto* /*buffer_assignment_proto*/,
-      absl::Span<const Literal* const> arguments, bool run_hlo_passes,
-      ExecutionProfile* profile) {
+      absl::Span<const Literal* const> arguments, bool run_hlo_passes) {
     LOG(WARNING) << "Ignoring the buffer assignment proto provided.";
-    return Execute(std::move(module), arguments, run_hlo_passes, profile);
+    return Execute(std::move(module), arguments, run_hlo_passes);
   }
 
   // Same as 3 Execute methods above, but with Executable as input.
   absl::StatusOr<Literal> ExecuteWithExecutable(
-      OpaqueExecutable* executable, absl::Span<const Literal> arguments,
-      ExecutionProfile* profile = nullptr);
+      OpaqueExecutable* executable, absl::Span<const Literal> arguments);
 
   absl::StatusOr<Literal> ExecuteWithExecutable(
-      OpaqueExecutable* executable,
-      absl::Span<const Literal* const> arguments) {
-    return ExecuteWithExecutable(executable, arguments, nullptr);
-  }
+      OpaqueExecutable* executable, absl::Span<const Literal* const> arguments);
 
-  virtual absl::StatusOr<Literal> ExecuteWithExecutable(
-      OpaqueExecutable* executable, absl::Span<const Literal* const> arguments,
-      ExecutionProfile* profile) = 0;
+  // Execute the given executable with the given argument literals. The
+  // executable is executed num_repeats times with the same inputs and the
+  // outputs are concatenated.
+  //
+  // The outer StatusOr captures any setup errors. The inner vector of StatusOrs
+  // captures any execution errors for each of the num_repeats executions.
+  //
+  // You may assume that the size of the vector is num_repeats.
+  virtual absl::StatusOr<std::vector<absl::StatusOr<Literal>>>
+  ExecuteWithExecutable(OpaqueExecutable* executable,
+                        absl::Span<const Literal* const> arguments,
+                        int64_t num_repeats) = 0;
 
   // Executes a given HLO module into a set of replicas, and returns a map
   // with the replica number as key, and the corresponding returned literal as
@@ -325,14 +300,6 @@ class HloRunnerInterface {
   // Returns the name of this runner.
   virtual absl::string_view Name() const = 0;
 
-  // Return the device shape representation of 'host_shape'.
-  virtual DeviceShapeRepresentationFn device_shape_representation_fn()
-      const = 0;
-  // Return the device shape size of 'host_shape'.
-  // This function is used e.g. to create a VerifiedHloModule. It returns an
-  // integer representing the size of the shape in bytes as opposed to a Shape.
-  virtual DeviceShapeSizeFn device_shape_size_fn() const = 0;
-
   // Returns the number of devices which are known. Not all of these devices may
   // be usable by XLA.
   virtual int device_count() const = 0;
@@ -345,8 +312,15 @@ class HloRunnerInterface {
   // OpaqueExecutable. Returns an error if the OpaqueExecutable cannot be
   // unwrapped, or if the OpaqueExecutable does not contain at least one
   // HloModule.
-  virtual absl::StatusOr<absl::Nonnull<const HloModule*>> HloModuleFromWrapped(
+  virtual absl::StatusOr<const HloModule* absl_nonnull> HloModuleFromWrapped(
       const OpaqueExecutable* wrapped) const = 0;
+
+  // Returns true if the two given OpaqueExecutables originate from the same
+  // runner and are equivalent according to some notion specific to that runner.
+  // Executables that were created by different runners can never be equivalent.
+  virtual bool ExecutablesAreEquivalent(
+      const OpaqueExecutable* absl_nonnull lhs,
+      const OpaqueExecutable* absl_nonnull rhs) const = 0;
 };
 
 }  // namespace xla

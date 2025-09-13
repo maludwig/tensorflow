@@ -27,54 +27,60 @@ limitations under the License.
 #include "absl/base/log_severity.h"
 #include "absl/log/scoped_mock_log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/test_helpers.h"
 #include "xla/layout.h"
 #include "xla/literal_util.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/layout_assignment.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/platform.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
 
 namespace xla {
 namespace {
 
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
 using ::testing::HasSubstr;
 
 std::unique_ptr<HloModule> CreateUnverifiedModule() {
   return std::make_unique<HloModule>("module", HloModuleConfig());
 }
 
-// This class cannot be converted to use HloTestBase. It explicitly
-// uses HloTestBase to create and test malformed HLOs.
-class HloVerifierTest : public HloTestBase {
+class HloVerifierTest : public HloHardwareIndependentTestBase {
  public:
   HloVerifierTest()
-      : HloTestBase(/*verifier_layout_sensitive=*/false,
-                    /*allow_mixed_precision_in_hlo_verifier=*/false) {}
+      : HloHardwareIndependentTestBase(
+            /*verifier_layout_sensitive=*/false,
+            /*allow_mixed_precision_in_hlo_verifier=*/false) {}
 };
 
-class HloVerifierTestAllowMixedPrecision : public HloTestBase {
+class HloVerifierTestAllowMixedPrecision
+    : public HloHardwareIndependentTestBase {
  public:
   HloVerifierTestAllowMixedPrecision()
-      : HloTestBase(/*verifier_layout_sensitive=*/false,
-                    /*allow_mixed_precision_in_hlo_verifier=*/true) {}
+      : HloHardwareIndependentTestBase(
+            /*verifier_layout_sensitive=*/false,
+            /*allow_mixed_precision_in_hlo_verifier=*/true) {}
 };
 
 class HloVerifierTestLayoutSensitive : public HloHardwareIndependentTestBase {
@@ -87,39 +93,40 @@ class HloVerifierTestLayoutSensitive : public HloHardwareIndependentTestBase {
 };
 
 class HloVerifierTestLayoutSensitiveAndAllowMixedPrecision
-    : public HloTestBase {
+    : public HloHardwareIndependentTestBase {
  public:
   HloVerifierTestLayoutSensitiveAndAllowMixedPrecision()
-      : HloTestBase(/*verifier_layout_sensitive=*/true,
-                    /*allow_mixed_precision_in_hlo_verifier=*/true,
-                    LayoutAssignment::InstructionCanChangeLayout) {}
+      : HloHardwareIndependentTestBase(
+            /*verifier_layout_sensitive=*/true,
+            /*allow_mixed_precision_in_hlo_verifier=*/true,
+            LayoutAssignment::InstructionCanChangeLayout) {}
 };
 
-class HloVerifierTestLayoutFusion : public HloTestBase {
+class HloVerifierTestLayoutFusion : public HloHardwareIndependentTestBase {
  public:
   HloVerifierTestLayoutFusion()
-      : HloTestBase(/*verifier_layout_sensitive=*/true,
-                    /*allow_mixed_precision_in_hlo_verifier=*/false) {}
+      : HloHardwareIndependentTestBase(
+            /*verifier_layout_sensitive=*/true,
+            /*allow_mixed_precision_in_hlo_verifier=*/false) {}
 };
 
-TEST_F(HloVerifierTest, NullInstructionParent) {
-  HloComputation::Builder builder(TestName());
-  const Shape scalar_shape = ShapeUtil::MakeShape(F32, {});
-  HloInstruction* param = builder.AddInstruction(
-      HloInstruction::CreateParameter(0, scalar_shape, "param"));
-  HloInstruction* negate = builder.AddInstruction(
-      HloInstruction::CreateUnary(scalar_shape, HloOpcode::kNegate, param));
-  auto module = CreateUnverifiedModule();
-  module->AddEntryComputation(builder.Build());
+class HloVerifierTestForCollectiveDeadlocks
+    : public HloHardwareIndependentTestBase {
+ public:
+  HloVerifierTestForCollectiveDeadlocks()
+      : HloHardwareIndependentTestBase(
+            /*verifier_layout_sensitive=*/false,
+            /*allow_mixed_precision_in_hlo_verifier=*/false,
+            /*instruction_can_change_layout_func=*/{},
+            /*verify_no_collective_deadlocks=*/true) {}
+};
 
-  TF_ASSERT_OK(verifier().Run(module.get()).status());
-
-  negate->set_parent(nullptr);
-
-  auto status = verifier().Run(module.get()).status();
-  ASSERT_FALSE(status.ok());
-  EXPECT_THAT(status.message(), HasSubstr("has a null parent pointer"));
-}
+class HloVeriferSkipCheckReplicaGroups : public HloHardwareIndependentTestBase {
+ public:
+  HloVeriferSkipCheckReplicaGroups()
+      : HloHardwareIndependentTestBase(
+            HloVerifierOpts{}.WithCheckReplicaGroups(false)) {}
+};
 
 TEST_F(HloVerifierTest, DifferentOperandParents) {
   HloComputation::Builder builder(TestName());
@@ -212,8 +219,50 @@ TEST_F(HloVerifierTest, CheckCallThreadMismatch) {
           .status();
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.message(),
-              HasSubstr("mycall top_apply computation execution thread does "
-                        "not match (parallel_thread vs main)"));
+              HasSubstr("Non-Embedded context callable instruction mycall "
+                        "to_apply computation execution thread does not match "
+                        "(parallel_thread vs main)"));
+}
+
+TEST_F(HloVerifierTest, CheckCallOperandOutputAliasing) {
+  constexpr absl::string_view hlo = R"(
+    HloModule Module
+
+    callme {
+      ROOT param = (s32[], f32[4]) parameter(0)
+    }
+
+    ENTRY entry {
+      p0 = (s32[], f32[4]) parameter(0)
+      ROOT mycall = (s32[], f32[4]) call(p0), to_apply=callme
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+
+  // We have to set the `output_to_operand_aliasing` attribute manually,
+  // because, even though the internal representation supports it for kCall, the
+  // parser doesn't.
+  Cast<HloCallInstruction>(
+      module->entry_computation()->GetInstructionWithName("mycall"))
+      ->set_output_to_operand_aliasing({{{}, {0, {}}}});
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("may not have an output-to-operand aliasing set."));
+}
+
+TEST_F(HloVerifierTest, CheckCustomCallOperandOutputAliasing) {
+  constexpr absl::string_view hlo = R"(
+    HloModule Module
+
+    ENTRY entry {
+      p0 = (s32[], f32[4]) parameter(0)
+      ROOT mycall = (s32[], f32[4]) custom-call(p0), custom_call_target="CallMe", output_to_operand_aliasing={{0}: (0, {0})}
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  TF_EXPECT_OK(verifier().Run(module.get()).status());
 }
 
 TEST_F(HloVerifierTest, CompositeCall) {
@@ -834,6 +883,41 @@ TEST_F(HloVerifierTestLayoutSensitive, ConcatWithLayoutChangeNotAllowed) {
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.message(),
               HasSubstr("Instruction shouldn't change layouts"));
+}
+
+TEST_F(HloVerifierTestLayoutSensitive,
+       ScatterIgnoreElementSizeForLayoutComparison) {
+  const char* const kScatterHlo = R"(
+    HloModule module
+    overwrite {
+      %p0 = s4[] parameter(0)
+      ROOT %p1 = s4[] parameter(1)
+    }
+
+    scatter {
+      %operand = s4[2048, 2048]{1,0:E(4)}  parameter(0)
+      %update = s4[32, 16, 32]{2,1,0} parameter(1)
+      %iota = s32[8, 4]{1,0} iota(), iota_dimension=0
+      %indices = s32[32, 1]{1,0} reshape(%iota)
+
+      ROOT %scatter = s4[2048, 2048]{1,0:E(4)} scatter(
+          s4[2048, 2048]{1,0} %operand,
+          s32[32, 1]{1,0} %indices,
+          s4[32, 16, 32]{2,1,0} %update
+        ),
+        update_window_dims={1,2},
+        inserted_window_dims={},
+        scatter_dims_to_operand_dims={0},
+        index_vector_dim=1,
+        unique_indices=false,
+        indices_are_sorted=true,
+        to_apply=overwrite
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(kScatterHlo));
+  auto status = verifier().Run(module.get()).status();
+  EXPECT_TRUE(status.ok());
 }
 
 TEST_F(HloVerifierTestLayoutSensitive, BitcastNeedsSameNumberOfElements) {
@@ -1657,13 +1741,13 @@ TEST_F(HloVerifierTest, AllReduce_MissingReplicaId) {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           MakeAllReduceComputation({{0, 1}, {2, 3}, {5, 6}}));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("Replica 4 is not named"));
+              HasSubstr("Replica 6 is out of range"));
 }
 
 TEST_F(HloVerifierTest, AllReduce_NotEnougReplicasInGroupConfig) {
   TF_ASSERT_OK_AND_ASSIGN(auto module, MakeAllReduceComputation({{0, 1}}, 8));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("In kCrossReplica mode, replica groups should contain "
+              HasSubstr("In cross_replica mode, replica groups should contain "
                         "8 replicas, but found 2"));
 }
 
@@ -1671,7 +1755,7 @@ TEST_F(HloVerifierTest, AllReduce_TooManyReplicasInGroupConfig) {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           MakeAllReduceComputation({{0, 1}, {2, 3}}, 2));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("In kCrossReplica mode, replica groups should contain "
+              HasSubstr("In cross_replica mode, replica groups should contain "
                         "2 replicas, but found 4"));
 }
 
@@ -1682,7 +1766,7 @@ TEST_F(HloVerifierTest, AllReduce_CrossReplicaAndPartition_Invalid) {
   EXPECT_THAT(
       verifier().Run(module.get()).status().message(),
       HasSubstr(
-          "In kCrossReplicaAndPartition mode, replica groups should contain "
+          "In cross_replica_and_partition mode, replica groups should contain "
           "2 replicas, but found 4"));
 }
 
@@ -1699,7 +1783,7 @@ TEST_F(HloVerifierTest, AllReduce_FlattenedID_Invalid) {
       MakeAllReduceComputation({{0, 1}, {2, 3}}, 1, 2,
                                "channel_id=1, use_global_device_ids=true"));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("In kFlattenedID mode, replica groups should contain "
+              HasSubstr("In flattened_id mode, replica groups should contain "
                         "2 flattened IDs, but found 4"));
 }
 
@@ -1840,7 +1924,7 @@ TEST_F(HloVerifierTest, AllToAll_MissingReplicaId) {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           MakeAllToAllComputation({{0, 1}, {2, 3}, {5, 6}}));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("Replica 4 is not named"));
+              HasSubstr("Replica 6 is out of range"));
 }
 
 TEST_F(HloVerifierTest, AllToAll_UniformSizeOfReplicasInGroup) {
@@ -1855,7 +1939,7 @@ TEST_F(HloVerifierTest, AllToAll_CrossPartition_Invalid) {
       auto module,
       MakeAllToAllComputation({{0, 1}, {2, 3}}, 1, 2, "channel_id=1"));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("In kCrossPartition mode, replica groups should "
+              HasSubstr("In cross_partition mode, replica groups should "
                         "contain 2 partitions, but found 4"));
 }
 
@@ -1932,6 +2016,23 @@ TEST_F(HloVerifierTest, CollectivePermuteSameTargetTwice) {
                           ParseAndReturnUnverifiedModule(kModuleStr));
   EXPECT_THAT(verifier().Run(module.get()).status().message(),
               HasSubstr("Target 2 appears more than once"));
+}
+
+TEST_F(HloVerifierTest, CollectivePermuteMultipeOperands) {
+  absl::string_view kModuleStr = R"(
+  HloModule test
+  ENTRY entry {
+    p0 = f32[128] parameter(0)
+    p1 = f32[128] parameter(1)
+    p2 = f32[128] parameter(2)
+    p3 = f32[128] parameter(3)
+    ROOT permute = (f32[128], f32[128], f32[128], f32[128]) collective-permute(
+      p0, p1, p2, p3), source_target_pairs={{0,1}, {1,2}, {2,0}}
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(kModuleStr));
+  TF_EXPECT_OK(verifier().Run(module.get()).status());
 }
 
 TEST_F(HloVerifierTest, CollectivePermuteSameSourceTooManyTimes) {
@@ -2202,61 +2303,27 @@ TEST_F(HloVerifierTest, FusionShapeVerifier) {
               HasSubstr("Fused computation shape"));
 }
 
-TEST_F(HloVerifierTest, FusionThreadVerifier) {
+TEST_F(HloVerifierTest, CallThreadVerifier) {
   const char* const kModuleStr = R"(
   HloModule test
 
-  fused_computation {
+  called_computation {
     ROOT p0 = f32[8,12] parameter(0)
   }, execution_thread="parallel_thread"
 
   ENTRY entry {
     p0 = f32[8,12] parameter(0)
-    ROOT out = f32[8,12] fusion(p0), kind=kInput, calls=fused_computation
+    ROOT out = f32[8,12] call(p0), to_apply=called_computation
   }
   )";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnUnverifiedModule(kModuleStr));
-  EXPECT_THAT(verifier().Run(module.get()).status().message(),
-              HasSubstr("expects parent computation thread name same as called "
-                        "computation's thread name"));
-}
-
-TEST_F(HloVerifierTest, FusionNestedComputationThreadVerifier) {
-  const char* const kModuleStr = R"(
-  HloModule test
-
-  add {
-    lhs = f32[] parameter(0)
-    rhs = f32[] parameter(1)
-    ROOT add = f32[] add(lhs, rhs)
-  }, execution_thread="parallel_thread"
-
-  fused_computation {
-    p0 = f32[8,12] parameter(0)
-    p1 = f32[8,12] parameter(1)
-    crs0 = f32[8,12] all-reduce(p1), replica_groups={}, to_apply=add
-    ROOT result = add(p0, crs0)
-  }
-
-  ENTRY entry {
-    p0 = f32[8,12] parameter(0)
-    p1 = f32[8,12] parameter(1)
-    ROOT out = f32[8,12] fusion(p0, p1), kind=kInput, calls=fused_computation
-  }
-  )";
-  TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnUnverifiedModule(kModuleStr));
-
-  auto status =
+  EXPECT_THAT(
       HloVerifier{HloVerifierOpts{}.VerifyCallNestedComputationThreadName()}
           .Run(module.get())
-          .status();
-  ASSERT_FALSE(status.ok());
-  EXPECT_THAT(
-      status.message(),
-      HasSubstr("crs0 top_apply computation execution thread does not match "
-                "(parallel_thread vs main)"));
+          .status()
+          .message(),
+      HasSubstr("to_apply computation execution thread does not match"));
 }
 
 TEST_F(HloVerifierTest, AllReduceVerifier) {
@@ -2718,15 +2785,11 @@ TEST_F(HloVerifierTest, InvalidChannelIDandUseGlobalDeviceIDs) {
     ROOT crs = f32[8]{0} all-reduce(input), replica_groups={},
                          use_global_device_ids=true, to_apply=add
   })";
-  TF_ASSERT_OK_AND_ASSIGN(auto module,
-                          ParseAndReturnUnverifiedModule(hlo_string));
-
-  auto status = verifier().Run(module.get()).status();
+  auto status = ParseAndReturnUnverifiedModule(hlo_string).status();
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(
       status.message(),
-      HasSubstr(
-          "Invalid combination of has_channel_id and use_global_device_ids"));
+      HasSubstr("Cannot have use_global_device_ids=true without channel_id"));
 }
 
 TEST_F(HloVerifierTest, ReduceScatterInvalidOutputSize0) {
@@ -2771,9 +2834,9 @@ TEST_F(HloVerifierTest, ReduceScatterInvalidScatterDim) {
 
   auto status = verifier().Run(module.get()).status();
   ASSERT_FALSE(status.ok());
-  EXPECT_THAT(
-      status.message(),
-      HasSubstr("ars->scatter_dimension() < ars->operand(i)->shape().rank()"));
+  EXPECT_THAT(status.message(), HasSubstr("ars->scatter_dimension() < "
+                                          "static_cast<int64_t>(ars->operand(i)"
+                                          "->shape().dimensions().size())"));
 }
 
 TEST_F(HloVerifierTest, ReduceScatterNonUniformGroups) {
@@ -2994,10 +3057,8 @@ TEST_F(HloVerifierTest, VerifyCustomCallThread) {
       HloVerifier{HloVerifierOpts{}.VerifyCallNestedComputationThreadName()}
           .Run(module.get())
           .status();
-  ASSERT_FALSE(status.ok());
-  EXPECT_THAT(status.message(),
-              HasSubstr("custom top_apply computation execution thread does "
-                        "not match (parallel_thread vs main)"));
+  // Embedded call context computation thread name is not checked.
+  ASSERT_TRUE(status.ok());
 }
 
 TEST_F(HloVerifierTest, CheckWhileThread) {
@@ -3190,22 +3251,6 @@ TEST_F(HloVerifierTest, InconsistentConditionSharding) {
   EXPECT_THAT(
       status.message(),
       HasSubstr("Inconsistent conditional sharding among instructions"));
-}
-
-TEST_F(HloVerifierTest, DisableS4Veridication) {
-  const char* const hlo = R"(
-  HloModule Module
-
-  ENTRY entry {
-    param0 = s32[] parameter(0)
-    x = s4[] convert(param0)
-    ROOT add = s4[] add(x, x)
-  }
-  )";
-  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
-  HloVerifier verifier{HloVerifierOpts{}.WithVerifyS4U4Usage(false)};
-  auto status = verifier.Run(module.get()).status();
-  ASSERT_TRUE(status.ok());
 }
 
 TEST(MetadataTrackerTest, MetadataTrackerLogsInfo) {
@@ -3408,24 +3453,6 @@ TEST_F(HloVerifierTest, EnableUnboundedDynamism) {
   HloVerifier verifier{HloVerifierOpts{}.WithAllowUnboundedDynamism(true)};
   auto status = verifier.Run(module.get()).status();
   ASSERT_TRUE(status.ok());
-}
-
-TEST_F(HloVerifierTest, SparseDotMetadataShape) {
-  const char* const kHlo = R"(
-  HloModule test
-  ENTRY entry {
-    %lhs = f32[10,16] parameter(0)
-    %rhs = f32[32,20] parameter(1)
-    %meta = u16[10,4] parameter(2)
-    ROOT %dot = f32[10,20] dot(%lhs, %rhs, %meta),
-        lhs_contracting_dims={1}, rhs_contracting_dims={0}, sparsity=L.1@2:4
-  }
-  )";
-  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(kHlo));
-  HloVerifier verifier{HloVerifierOpts{}.WithAllowUnboundedDynamism(true)};
-  auto status = verifier.Run(module.get()).status();
-  ASSERT_FALSE(status.ok());
-  EXPECT_THAT(status.message(), HasSubstr("Expected sparse dot metadata"));
 }
 
 TEST_F(HloVerifierTestLayoutSensitive,
@@ -3668,7 +3695,22 @@ ENTRY %entry_computation {
                           ParseAndReturnUnverifiedModule(hlo_string));
 
   auto status = verifier().Run(module.get()).status();
+  EXPECT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTest, MismatchedTupleInOriginalValue) {
+  const std::string hlo_string = R"(
+HloModule module
+ENTRY %entry_computation {
+  ROOT op = f32[] parameter(0),  origin={(({}, {"v2"}), {"v3"})}
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
   EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(), HasSubstr("Mismatched tuple structure"));
 }
 
 TEST_F(HloVerifierTest, RaggedAllToAllWithRank1OffsetsSizes) {
@@ -3792,6 +3834,1176 @@ ENTRY main {
   EXPECT_THAT(
       status.message(),
       HasSubstr("Instruction shouldn't have the layout of host memory space"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersEntryParameterCannotHaveBuffers) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p = b(f32[32]) parameter(0)
+    ROOT r = f32[32] custom-call(p), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("buffers aren't allowed in this context"));
+}
+TEST_F(HloVerifierTest, VerifyBuffersPinMissingAlias) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    a = b(f32[32]) custom-call(p0), custom_call_target="Pin"
+    ROOT b = f32[32] custom-call(a), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(
+      status.message(),
+      HasSubstr("custom-call to Pin must have one output-to-operand aliasing"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersUnpinMissingAlias) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    a = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    ROOT b = f32[32] custom-call(a), custom_call_target="Unpin"
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(
+      status.message(),
+      HasSubstr(
+          "custom-call to Unpin must have one output-to-operand aliasing"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersAddOpCannotHaveBuffers) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    a = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    b = b(f32[32]) add(a, a)
+    ROOT c = f32[32] custom-call(b), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(), HasSubstr("Expected array argument"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersSpecialCustomCallTargets) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    a = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    ROOT c = f32[32] custom-call(a), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersResultBufferNotInOperands) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    call0 = b(f32[32]) custom-call(b), custom_call_target="start_send",
+      output_to_operand_aliasing={{}: (0, {})}
+    a = f32[32] add(p0, p0)
+    call1 = (b(f32[16]), b(f32[32]), token[]) custom-call(call0),
+      custom_call_target="end_send",
+      output_to_operand_aliasing={{1}: (0, {})},
+      custom_call_has_side_effect=true
+    ROOT c = copy(a)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("buffer is used in results but not in operands"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersBufferInResultMultipleTimes) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    call0 = b(f32[32]) custom-call(b), custom_call_target="start_send",
+      output_to_operand_aliasing={{}: (0, {})}
+    a = f32[32] add(p0, p0)
+    call1 = (b(f32[32]), b(f32[32]), token[]) custom-call(call0),
+      custom_call_target="end_send",
+      output_to_operand_aliasing={{0}: (0, {}), {1}: (0, {})},
+      custom_call_has_side_effect=true
+    ROOT c = copy(a)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("buffer is used in results multiple times"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersBufferWithTwoWritesStraightLine) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b0 = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    call0 = (b(f32[32]), u32[], token[]) custom-call(b0),
+      custom_call_target="foo",
+      output_to_operand_aliasing={{0}: (0, {})}
+    b1 = b(f32[32]) get-tuple-element(call0), index=0
+    b2 = b(f32[32]) get-tuple-element(call0), index=0
+    // Writer.
+    tuple = (b(f32[32]), f32[32]) tuple(b1, p0)
+    call1 = (b(f32[32]), token[]) custom-call(tuple),
+      custom_call_target="writer",
+      output_to_operand_aliasing={{0}: (0, {0})},
+      custom_call_has_side_effect=true
+    // Another writer.
+    ROOT v = f32[32] custom-call(b2), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("an HLO buffer value has more than one writers"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersBufferWithTwoWritesWhileRelated1) {
+  const char* const hlo = R"(
+  // Infinite loop to keep IR small.
+  cond {
+    param = (s32[], b(s32[2])) parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  body {
+    param = (s32[], b(s32[2])) parameter(0)
+    count = get-tuple-element(%param), index=0
+    b1 = get-tuple-element(%param), index=1
+    b2 = b(s32[2]) custom-call(b1), custom_call_target="foo",
+      output_to_operand_aliasing={{}: (0, {})}
+    ROOT result = (s32[], b(s32[2])) tuple(count, b2)
+  }
+
+  ENTRY test_computation {
+    c0 = s32[] constant(0)
+    c1 = s32[] constant(1)
+    init = s32[2] broadcast(c1), dimensions={}
+    b0 = b(s32[2]) custom-call(init), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    while_init = (s32[], b(s32[2])) tuple(c0, b0)
+    while_result = (s32[], b(s32[2])) while(while_init), body=body,
+      condition=cond
+    // b0 is written by while-loop and Unpin.
+    ROOT v = s32[2] custom-call(b0), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("an HLO buffer value has more than one writers"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersBufferWithTwoWritesWhileRelated2) {
+  const char* const hlo = R"(
+  // Infinite loop to keep IR small.
+  cond {
+    param = (s32[], b(s32[2])) parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  body {
+    param = (s32[], b(s32[2])) parameter(0)
+    count = get-tuple-element(%param), index=0
+    b1 = get-tuple-element(%param), index=1
+    b2 = b(s32[2]) custom-call(b1), custom_call_target="foo",
+      output_to_operand_aliasing={{}: (0, {})}
+    ROOT result = (s32[], b(s32[2])) tuple(count, b2)
+  }
+
+  ENTRY test_computation {
+    c0 = s32[] constant(0)
+    c1 = s32[] constant(1)
+    init = s32[2] broadcast(c1), dimensions={}
+    b0 = b(s32[2]) custom-call(init), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    while_init = (s32[], b(s32[2])) tuple(c0, b0)
+    while_result = (s32[], b(s32[2])) while(while_init), body=body,
+      condition=cond
+    b1 = b(s32[2]) get-tuple-element(while_result), index=1
+    // b1 is written by bar and Unpin.
+    b2 = b(s32[2]) custom-call(b1), custom_call_target="bar",
+      output_to_operand_aliasing={{}: (0, {})}
+    ROOT v = s32[2] custom-call(b0), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("an HLO buffer value has more than one writers"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersBufferWithTwoWritesWhileBodyParam) {
+  const char* const hlo = R"(
+  // Infinite loop to keep IR small.
+  cond {
+    param = (s32[], b(s32[2])) parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  body {
+    param = (s32[], b(s32[2])) parameter(0)
+    count = get-tuple-element(%param), index=0
+    b1 = get-tuple-element(%param), index=1
+    // b1 is written by foo and pass back to the while-loop.
+    b2 = b(s32[2]) custom-call(b1), custom_call_target="foo",
+      output_to_operand_aliasing={{}: (0, {})}
+    tuple = (s32[], b(s32[2])) tuple(count, b1)
+    b3 = b(s32[2]) get-tuple-element(tuple), index=1
+    ROOT result = (s32[], b(s32[2])) tuple(count, b3)
+  }
+
+  ENTRY test_computation {
+    c0 = s32[] constant(0)
+    c1 = s32[] constant(1)
+    init = s32[2] broadcast(c1), dimensions={}
+    b0 = b(s32[2]) custom-call(init), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    while_init = (s32[], b(s32[2])) tuple(c0, b0)
+    while_result = (s32[], b(s32[2])) while(while_init), body=body, condition=cond
+    b1 = b(s32[2]) get-tuple-element(while_result), index=1
+    ROOT v = s32[2] custom-call(b1), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("an HLO buffer value has more than one writers"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersBufferWithTwoWritesWhileBody) {
+  const char* const hlo = R"(
+  // Infinite loop to keep IR small.
+  cond {
+    param = (s32[], b(s32[2])) parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  body {
+    param = (s32[], b(s32[2])) parameter(0)
+    count = get-tuple-element(%param), index=0
+    b2 = get-tuple-element(%param), index=1
+    b3 = b(s32[2]) custom-call(b2), custom_call_target="foo",
+      output_to_operand_aliasing={{}: (0, {})}
+    // b3 is modified by bar and also fed back to the while-loop.
+    b4 = b(s32[2]) custom-call(b3), custom_call_target="bar",
+      output_to_operand_aliasing={{}: (0, {})}
+    ROOT result = (s32[], b(s32[2])) tuple(count, b3)
+  }
+
+  ENTRY test_computation {
+    c0 = s32[] constant(0)
+    c1 = s32[] constant(1)
+    init = s32[2] broadcast(c1), dimensions={}
+    b0 = b(s32[2]) custom-call(init), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    while_init = (s32[], b(s32[2])) tuple(c0, b0)
+    while_result = (s32[], b(s32[2])) while(while_init), body=body, condition=cond
+    b1 = b(s32[2]) get-tuple-element(while_result), index=1
+    ROOT v = s32[2] custom-call(b1), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("an HLO buffer value has more than one writers"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersOperandBufferNotInResult) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    call0 = b(f32[32]) custom-call(b), custom_call_target="start_send",
+      output_to_operand_aliasing={{}: (0, {})}
+    a = f32[32] add(p0, p0)
+    call1 = (f32[32], token[]) custom-call(call0),
+      custom_call_target="read_only",
+      custom_call_has_side_effect=true
+    ROOT c = copy(a)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
+              HasSubstr("buffer is used in operands but not in results"));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersNestedInOperands) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b0 = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    tuple = (b(f32[32]), f32[32]) tuple(b0, p0)
+    b1 = b(f32[32]) custom-call(tuple), custom_call_target="foo",
+      output_to_operand_aliasing={{}: (0, {0})}
+    ROOT v0 = f32[32] custom-call(b1), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersNestedInResults) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b0 = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    call = ((b(f32[32])), f32[]) custom-call(b0),
+      custom_call_target="foo",
+      output_to_operand_aliasing={{0, 0}: (0, {})}
+    b1 = (b(f32[32])) get-tuple-element(call), index=0
+    b2 = b(f32[32]) get-tuple-element(b1), index=0
+    ROOT v0 = f32[32] custom-call(b2), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersStraightLineChain) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[32] parameter(0)
+    b0 = b(f32[32]) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    async-start = (b(f32[32]), u32[], token[])
+      custom-call(b0), custom_call_target="start_send",
+      output_to_operand_aliasing={{0}: (0, {})}
+    a = f32[32] add(p0, p0)
+    b1 = b(f32[32]) get-tuple-element(async-start), index=0
+    v0 = u32[] get-tuple-element(async-start), index=1
+    v1 = token[] get-tuple-element(async-start), index=2
+    async-done = (b(f32[32]), token[]) custom-call(b1, v0, v1),
+      custom_call_target="end_send",
+      output_to_operand_aliasing={{0}: (0, {})},
+      custom_call_has_side_effect=true
+    ROOT c = copy(a)
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersRotatedChain) {
+  const char* const hlo = R"(
+  HloModule module
+
+  // Infinite loop to keep IR small.
+  cond {
+    param = (s32[], b(s32[2])) parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  body {
+    param = (s32[], b(s32[2])) parameter(0)
+    count = get-tuple-element(%param), index=0
+    b3 = get-tuple-element(%param), index=1
+
+    c1 = s32[] constant(1)
+    new_count = s32[] add(count, c1)
+    b4 = b(s32[2]) custom-call(b3), custom_call_target="foo",
+      output_to_operand_aliasing={{}: (0, {})}
+    b5 = b(s32[2]) custom-call(b4), custom_call_target="bar",
+      output_to_operand_aliasing={{}: (0, {})}
+    v0 = s32[2] custom-call(b5), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+    c1_broadcast = s32[2] broadcast(c1), dimensions={}
+    v1 = s32[2] add(c1_broadcast, v0)
+
+    b6 = b(s32[2]) custom-call(v1), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    ROOT result = (s32[], b(s32[2])) tuple(new_count, b6)
+  }
+
+  ENTRY test_computation {
+    c0 = s32[] constant(0)
+    c1 = s32[] constant(1)
+    init = s32[2] broadcast(c1), dimensions={}
+    b0 = b(s32[2]) custom-call(init), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    while_init = (s32[], b(s32[2])) tuple(c0, b0)
+    while_result = (s32[], b(s32[2])) while(while_init), body=body, condition=cond
+    b1 = b(s32[2]) get-tuple-element(while_result), index=1
+    ROOT v = s32[2] custom-call(b1), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvDeadlockNotCheckedOnUnscheduledModule) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,2}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{2,3}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()), IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks, VerifySendRecvDeadlockOnRecv) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    after_all = token[] after-all()
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{3,0}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    recv2 = (f32[], u32[], token[]) recv(after_all), channel_id=2, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1}}"}
+    ROOT recv2-done = (f32[], token[]) recv-done(recv2), channel_id=2
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Expected send to match recv")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks, VerifySendRecvDeadlockOnSend) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{3,0}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    send2 = (f32[], u32[], token[]) send(c0, after_all), channel_id=2, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1}}"}
+    ROOT send2-done = token[] send-done(send2), channel_id=2
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Expected recv to match send")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvDeadlockOnOtherCollectives) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{3,0}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(
+      verifier().Run(module.get()),
+      StatusIs(
+          absl::StatusCode::kInternal,
+          HasSubstr(
+              "Introducing the following instruction will cause a deadlock")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvDeadlockOverMultipleComputations) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  while_body {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{3,0}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    params = (f32[10], bf16[10]) parameter(0)
+    p0 = f32[10] get-tuple-element(params), index=0
+    p1 = bf16[10] get-tuple-element(params), index=1
+    ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    ag_first_result = f32[20] get-tuple-element(ag), index=0
+    recv1_result = f32[] get-tuple-element(recv1-done), index=0
+    recv1_token = token[] get-tuple-element(recv1-done), index=1
+    ROOT result = (f32[20], f32[], token[]) tuple(ag_first_result, recv1_result, recv1_token)
+  }
+
+  while_condition {
+    param = (f32[10], bf16[10]) parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  ENTRY test_computation {
+    after_all = token[] after-all()
+    recv = (f32[], u32[], token[]) recv(after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3}}"}
+    recv_done = (f32[], token[]) recv-done(recv), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    init = (f32[10], bf16[10]) tuple(p0, p1)
+    while = (f32[20], f32[], token[]) while(init),
+        condition=while_condition, body=while_body
+    another_recv_token = token[] get-tuple-element(while), index=2
+    another_recv = (f32[], u32[], token[]) recv(another_recv_token), channel_id=2
+    ROOT another_recv_done = (f32[], token[]) recv-done(another_recv), channel_id=2
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(
+      verifier().Run(module.get()),
+      StatusIs(
+          absl::StatusCode::kInternal,
+          HasSubstr(
+              "Expected send and recv instructions to have the same "
+              "source-target pairs, but could not match some instructions.")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvDeadlockOnNonMatchingSourceTargetPairs) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,2}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{2,3}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(
+      verifier().Run(module.get()),
+      StatusIs(absl::StatusCode::kInternal,
+               HasSubstr("Expected send and recv instructions to have the same "
+                         "source-target pairs")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvDeadlockOnDuplicateSource) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{0,2}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{0,2}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(
+      verifier().Run(module.get()),
+      StatusIs(absl::StatusCode::kInternal,
+               HasSubstr("Expected send and recv instructions to have unique "
+                         "source and target pairs")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvDeadlockOnDuplicateTarget) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{2,1}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{2,1}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(
+      verifier().Run(module.get()),
+      StatusIs(absl::StatusCode::kInternal,
+               HasSubstr("Expected send and recv instructions to have unique "
+                         "source and target pairs")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks, VerifySendRecvDeadlockOnCycle) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,0}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,0}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Expected send and recv instructions to have "
+                                 "non-cyclical source-target pairs")));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks, VerifySendRecvNoDeadlocks) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    p0 = f32[10] parameter(0)
+    p1 = bf16[10] parameter(1)
+    ROOT ag = (f32[20], bf16[20]) all-gather(p0, p1), dimensions={0}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()), IsOkAndHolds(false));
+}
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifySendRecvNoDeadlocksWithWhileLoop) {
+  const char* const hlo = R"(
+  HloModule module, is_scheduled=true
+
+  while_body {
+    c0 = f32[] parameter(0)
+    after_all = token[] after-all()
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1, frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{1,0}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    ROOT recv1_result = f32[] get-tuple-element(recv1-done), index=0
+  }
+
+  while_condition {
+    c0 = f32[] parameter(0)
+    ROOT infinite_loop = pred[] constant(true)
+  }
+
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    recv1 = (f32[], u32[], token[]) recv(after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{0,1}}"}
+    recv1-done = (f32[], token[]) recv-done(recv1), channel_id=1
+    ROOT while_res = f32[] while(c0), condition=while_condition, body=while_body
+    send1 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1,
+          frontend_attributes={
+            _xla_send_recv_source_target_pairs="{{1,0}}"}
+    send1-done = token[] send-done(send1), channel_id=1
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()), IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifyAsyncComputationWithMultipleSendRecvs) {
+  const char* const hlo = R"(
+HloModule nccl_group_send_recv_no_loop_x4, is_scheduled=true
+
+wrapped_send_recv {
+  param0 = f32[] parameter(0)
+  param1 = token[] parameter(1)
+  send1 = (f32[], u32[], token[]) send(param0, param1), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{0,1},{1,2}}}
+  param2 = f32[] parameter(2)
+  param3 = token[] parameter(3)
+  send2 = (f32[], u32[], token[]) send(param2, param3), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{2,3}}}
+  param4 = token[] parameter(4)
+  recv1 = (f32[], u32[], token[]) recv(param4), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{0,1},{1,2}}}
+  param5 = token[] parameter(5)
+  recv2 = (f32[], u32[], token[]) recv(param5), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{2,3}}}
+  ROOT out = ((f32[], u32[], token[]), (f32[], u32[], token[]),
+    (f32[], u32[], token[]), (f32[], u32[], token[]))
+    tuple(send1, send2, recv1, recv2)
+}
+
+ENTRY main {
+  data1 = f32[] constant(10)
+  after-all1 = token[] after-all()
+  data2 = f32[] constant(20)
+  after-all2 = token[] after-all()
+  async-comp-start = ((f32[], token[], f32[], token[], token[], token[]),
+    ((f32[], u32[], token[]), (f32[], u32[], token[]), (f32[], u32[], token[]),
+    (f32[], u32[], token[])), s32[]) async-start(data1, after-all1,
+    data2, after-all2, after-all1, after-all2), calls=wrapped_send_recv
+  async-comp-done = ((f32[], u32[], token[]), (f32[], u32[], token[]),
+    (f32[], u32[], token[]), (f32[], u32[], token[])) async-done(async-comp-start)
+  unpack-recv-done1 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=2
+  recv-done-data1 = f32[] get-tuple-element(unpack-recv-done1), index=0
+  recv-done-token1 = token[] get-tuple-element(unpack-recv-done1), index=2
+  recv-done1 = (f32[], token[]) tuple(recv-done-data1, recv-done-token1),
+    control-predecessors={async-comp-start}
+  data-out1 = f32[] get-tuple-element(recv-done1), index=0
+  unpack-recv-done2 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=3
+  recv-done-data2 = f32[] get-tuple-element(unpack-recv-done2), index=0
+  recv-done-token2 = token[] get-tuple-element(unpack-recv-done2), index=2
+  recv-done2 = (f32[], token[]) tuple(recv-done-data2, recv-done-token2),
+    control-predecessors={async-comp-start}
+  data-out2 = f32[] get-tuple-element(recv-done2), index=0
+  ROOT out = (f32[], f32[]) tuple(data-out1, data-out2)
+  unpack-send-done1 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=0
+  send-done1 = token[] get-tuple-element(unpack-send-done1), index=2
+  unpack-send-done2 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=1
+  send-done2 = token[] get-tuple-element(unpack-send-done2), index=2
+}
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()), IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTestForCollectiveDeadlocks,
+       VerifyAsyncComputationPartiallyPipelined) {
+  const char* const hlo = R"(
+HloModule nccl_group_send_recv_no_loop_x4, is_scheduled=true
+
+wrapped_send_recv {
+  param0 = f32[] parameter(0)
+  param1 = token[] parameter(1)
+  send1 = (f32[], u32[], token[]) send(param0, param1), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{0,1},{1,2}}}
+  param2 = f32[] parameter(2)
+  param3 = token[] parameter(3)
+  send2 = (f32[], u32[], token[]) send(param2, param3), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{2,3}}}
+  param4 = token[] parameter(4)
+  recv1 = (f32[], u32[], token[]) recv(param4), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{0,1},{1,2}}}
+  param5 = token[] parameter(5)
+  recv2 = (f32[], u32[], token[]) recv(param5), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{2,3}}}
+  ROOT out = ((f32[], u32[], token[]), (f32[], u32[], token[]),
+    (f32[], u32[], token[]), (f32[], u32[], token[]))
+    tuple(send1, send2, recv1, recv2)
+}
+
+ENTRY main {
+  data1 = f32[] constant(10)
+  after-all1 = token[] after-all()
+  data2 = f32[] constant(20)
+  after-all2 = token[] after-all()
+  data3 = f32[] constant(30)
+  after-all3 = token[] after-all()
+  bwd_send = (f32[], u32[], token[]) send(data3, after-all3), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{1,0}}}
+  bwd_send_done = token[] send-done(bwd_send), channel_id=0
+  async-comp-start = ((f32[], token[], f32[], token[], token[], token[]),
+    ((f32[], u32[], token[]), (f32[], u32[], token[]), (f32[], u32[], token[]),
+    (f32[], u32[], token[])), s32[]) async-start(data1, after-all1,
+    data2, after-all2, after-all1, after-all2), calls=wrapped_send_recv
+  async-comp-done = ((f32[], u32[], token[]), (f32[], u32[], token[]),
+    (f32[], u32[], token[]), (f32[], u32[], token[])) async-done(async-comp-start)
+  bwd_recv = (f32[], u32[], token[]) recv(after-all3), channel_id=0,
+    frontend_attributes={_xla_send_recv_source_target_pairs={{1,0}}}
+  bwd_recv_done = (f32[], token[]) recv-done(bwd_recv), channel_id=0
+  unpack-recv-done1 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=2
+  recv-done-data1 = f32[] get-tuple-element(unpack-recv-done1), index=0
+  recv-done-token1 = token[] get-tuple-element(unpack-recv-done1), index=2
+  recv-done1 = (f32[], token[]) tuple(recv-done-data1, recv-done-token1),
+    control-predecessors={async-comp-start}
+  data-out1 = f32[] get-tuple-element(recv-done1), index=0
+  unpack-recv-done2 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=3
+  recv-done-data2 = f32[] get-tuple-element(unpack-recv-done2), index=0
+  recv-done-token2 = token[] get-tuple-element(unpack-recv-done2), index=2
+  recv-done2 = (f32[], token[]) tuple(recv-done-data2, recv-done-token2),
+    control-predecessors={async-comp-start}
+  data-out2 = f32[] get-tuple-element(recv-done2), index=0
+  ROOT out = (f32[], f32[]) tuple(data-out1, data-out2)
+  unpack-send-done1 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=0
+  send-done1 = token[] get-tuple-element(unpack-send-done1), index=2
+  unpack-send-done2 = (f32[], u32[], token[]) get-tuple-element(async-comp-done), index=1
+  send-done2 = token[] get-tuple-element(unpack-send-done2), index=2
+}
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()), IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTest, VerifyMatchingSendSameChannel) {
+  const char* const hlo = R"(
+  HloModule module
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send0 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, is_host_transfer=true
+    send0-done = token[] send-done(send0), channel_id=1, is_host_transfer=true
+    c1 = f32[] constant(1)
+    send1 = (f32[], u32[], token[]) send(c1, send0-done), channel_id=1, is_host_transfer=true
+    ROOT send1-done = token[] send-done(send1), channel_id=1, is_host_transfer=true
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()), absl_testing::IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTest, VerifyMatchingSendSameChannelDifferentShape) {
+  const char* const hlo = R"(
+  HloModule module
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send0 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, is_host_transfer=true
+    send0-done = token[] send-done(send0), channel_id=1, is_host_transfer=true
+    c1 = f32[10] constant(1)
+    send1 = (f32[10], u32[], token[]) send(c1, send0-done), channel_id=1, is_host_transfer=true
+    ROOT send1-done = token[] send-done(send1), channel_id=1, is_host_transfer=true
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()),
+              absl_testing::StatusIs(
+                  absl::StatusCode::kInternal,
+                  HasSubstr("Host-transfer send/recv instructions that use the "
+                            "same channel must be identical")));
+}
+
+TEST_F(HloVerifierTest, VerifyMatchingSendSameChannelDifferentAttributes) {
+  const char* const hlo = R"(
+  HloModule module
+  ENTRY test_computation {
+    c0 = f32[] constant(0)
+    after_all = token[] after-all()
+    send0 = (f32[], u32[], token[]) send(c0, after_all), channel_id=1, is_host_transfer=true, frontend_attributes={_xla_host_transfer_rendezvous="_foo"}
+    send0-done = token[] send-done(send0), channel_id=1, is_host_transfer=true
+    c1 = f32[] constant(1)
+    send1 = (f32[], u32[], token[]) send(c1, send0-done), channel_id=1, is_host_transfer=true
+    ROOT send1-done = token[] send-done(send1), channel_id=1, is_host_transfer=true, frontend_attributes={_xla_host_transfer_rendezvous="_bar"}
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  EXPECT_THAT(verifier().Run(module.get()),
+              absl_testing::StatusIs(
+                  absl::StatusCode::kInternal,
+                  HasSubstr("Host-transfer send/recv instructions that use the "
+                            "same channel must be identical")));
+}
+
+TEST_F(HloVerifierTest, MismatchPartitionCount) {
+  const char* const hlo = R"(
+HloModule all_gather_module
+
+ENTRY main {
+  %data = f32[1024]{0} parameter(0)
+  // all-gather on 4 partitions.
+  ROOT %ag = f32[4096]{0} all-gather(%data),
+    dimensions={0}, replica_groups={{0,1,2,3}},
+    use_global_device_ids=true, channel_id=1
+}
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  module->mutable_config().set_replica_count(1);
+  module->mutable_config().set_num_partitions(8);
+  EXPECT_THAT(
+      verifier().Run(module.get()),
+      absl_testing::StatusIs(absl::StatusCode::kInternal,
+                             HasSubstr("replica groups should contain")));
+}
+
+TEST_F(HloVeriferSkipCheckReplicaGroups, MismatchPartitionCount) {
+  const char* const hlo = R"(
+HloModule all_gather_module
+
+ENTRY main {
+  %data = f32[1024]{0} parameter(0)
+  // all-gather on 4 partitions.
+  ROOT %ag = f32[4096]{0} all-gather(%data),
+    dimensions={0}, replica_groups={{0,1,2,3}},
+    use_global_device_ids=true, channel_id=1
+}
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  module->mutable_config().set_replica_count(1);
+  module->mutable_config().set_num_partitions(8);
+  EXPECT_THAT(verifier().Run(module.get()), absl_testing::IsOk());
+}
+
+TEST_F(HloVerifierTest, ScaledDotWithNoScalesFails) {
+  static constexpr absl::string_view kScaledDotHloString = R"(
+    HloModule module
+    ENTRY entry_computation {
+      a = f32[2,10] parameter(0)
+      b = f32[10,2] parameter(1)
+      a_scale = f32[] constant(1)
+      b_scale = f32[] constant(1)
+      ROOT dot = f32[2,2] scaled-dot(a, a_scale, b, b_scale),
+        lhs_contracting_dims={1},
+        rhs_contracting_dims={0}
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(kScaledDotHloString));
+
+  auto status = verifier().Run(module.get()).status();
+  EXPECT_THAT(
+      status,
+      absl_testing::StatusIs(
+          absl::StatusCode::kFailedPrecondition,
+          HasSubstr("At least one of the scales should be not a scalar in")));
+}
+
+TEST_F(HloVerifierTest, ScaledDotWithBothScalesSucceeds) {
+  static constexpr absl::string_view kScaledDotHloString = R"(
+    HloModule module
+    ENTRY entry_computation {
+      a = f8e5m2[2,10] parameter(0)
+      b = f8e8m0fnu[10,2] parameter(1)
+      a_scale = f8e5m2[2,2] parameter(2)
+      b_scale = f8e8m0fnu[2,2] parameter(3)
+      ROOT dot = f32[2,2] scaled-dot(a, a_scale, b, b_scale),
+        lhs_contracting_dims={1},
+        rhs_contracting_dims={0}
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kScaledDotHloString));
+  EXPECT_THAT(verifier().Run(module.get()), absl_testing::IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTest, ScaledDotInvalidScaleShapeFails) {
+  static constexpr absl::string_view kScaledDotHloString = R"(
+    HloModule module
+    ENTRY entry_computation {
+      a = f32[2,10] parameter(0)
+      b = f32[10,2] parameter(1)
+      a_scale = f32[2,2,2] parameter(2)
+      b_scale = f32[2,2,2] parameter(3)
+      ROOT dot = f32[2,2] scaled-dot(a, a_scale, b, b_scale),
+        lhs_contracting_dims={1},
+        rhs_contracting_dims={0}
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(kScaledDotHloString));
+
+  auto status = verifier().Run(module.get()).status();
+  EXPECT_THAT(status,
+              absl_testing::StatusIs(
+                  absl::StatusCode::kFailedPrecondition,
+                  HasSubstr("different number of dimensions than operand")))
+      << status;
+}
+
+TEST_F(HloVerifierTest, ScaledDotWithInvalidScaleContractingDimSizeFails) {
+  static constexpr absl::string_view kScaledDotHloString = R"(
+    HloModule module
+    ENTRY entry_computation {
+      a = f32[2,10] parameter(0)
+      b = f32[10,2] parameter(1)
+      a_scale = f32[2,6] parameter(2)
+      b_scale = f32[6,2] parameter(3)
+      ROOT dot = f32[2,2] scaled-dot(a, a_scale, b, b_scale),
+        lhs_contracting_dims={1},
+        rhs_contracting_dims={0}
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(kScaledDotHloString));
+
+  auto status = verifier().Run(module.get()).status();
+  EXPECT_THAT(status, absl_testing::StatusIs(
+                          absl::StatusCode::kFailedPrecondition,
+                          HasSubstr("should be a multiple of dimension")))
+      << status;
+}
+
+TEST_F(HloVerifierTest, ScaledDotWithScaleNonContractingDimSucceeds) {
+  static constexpr absl::string_view kScaledDotHloString = R"(
+    HloModule module
+    ENTRY entry_computation {
+      a = f32[2,10] parameter(0)
+      b = f32[10,2] parameter(1)
+      a_scale = f32[1,5] parameter(2)
+      b_scale = f32[5,1] parameter(3)
+      ROOT dot = f32[2,2] scaled-dot(a, a_scale, b, b_scale),
+        lhs_contracting_dims={1},
+        rhs_contracting_dims={0}
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(kScaledDotHloString));
+
+  EXPECT_THAT(verifier().Run(module.get()), absl_testing::IsOkAndHolds(false));
+}
+
+TEST_F(HloVerifierTest, VerifyBuffersLayoutChangeInPinAllowed) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[4,2]{1,0} parameter(0)
+    a = b(f32[4,2]{0,1}) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    ROOT c = f32[4,2]{0,1} custom-call(a), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
+}
+
+TEST_F(HloVerifierTestLayoutSensitive,
+       VerifyBuffersLayoutChangeInPinNotAllowed) {
+  const char* const hlo = R"(
+  HloModule module
+
+  ENTRY computation {
+    p0 = f32[4,2]{1,0} parameter(0)
+    a = b(f32[4,2]{0,1}) custom-call(p0), custom_call_target="Pin",
+      output_to_operand_aliasing={{}:(0, {})}
+    ROOT c = f32[4,2]{0,1} custom-call(a), custom_call_target="Unpin",
+      output_to_operand_aliasing={{}:(0, {})}
+  })";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnUnverifiedModule(hlo));
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.message(), HasSubstr("Different aliasing shapes"));
 }
 
 }  // namespace

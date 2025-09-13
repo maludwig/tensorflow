@@ -13,10 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -24,9 +27,12 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/service/platform_util.h"
+#include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/gpu/gpu_test_kernels.h"
 #include "xla/stream_executor/gpu/gpu_test_kernels_fatbin.h"
+#include "xla/stream_executor/gpu/tma_metadata.h"
+#include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/kernel_spec.h"
 #include "xla/stream_executor/launch_dim.h"
 #include "xla/stream_executor/platform.h"
@@ -36,8 +42,9 @@ limitations under the License.
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/typed_kernel_factory.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tsl/platform/protobuf.h"
 
 namespace stream_executor::gpu {
 namespace {
@@ -45,6 +52,7 @@ namespace {
 using AddI32Kernel =
     TypedKernelFactory<DeviceMemory<int32_t>, DeviceMemory<int32_t>,
                        DeviceMemory<int32_t>>;
+using TmaKernel = TypedKernelFactory<TensorMap, TensorMap, TensorMap>;
 
 class GpuKernelTest : public ::testing::Test {
  public:
@@ -55,7 +63,7 @@ class GpuKernelTest : public ::testing::Test {
     executor_ = platform->ExecutorForDevice(0).value();
   }
 
-  void RunAddI32Kernel(const MultiKernelLoaderSpec& spec) {
+  void RunAddI32Kernel(const KernelLoaderSpec& spec) {
     TF_ASSERT_OK_AND_ASSIGN(auto stream, executor_->CreateStream());
     TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor_, spec));
 
@@ -96,14 +104,126 @@ TEST_F(GpuKernelTest, LoadAndRunKernelFromPtx) {
 }
 
 TEST_F(GpuKernelTest, LoadAndRunKernelFromCubin) {
-  MultiKernelLoaderSpec spec(/*arity=*/3);
-  TF_ASSERT_OK_AND_ASSIGN(auto binary, GetGpuTestKernelsFatbin());
-  spec.AddCudaCubinInMemory(binary, "AddI32");
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto binary, GetGpuTestKernelsFatbin(executor_->GetPlatform()->Name()));
+  KernelLoaderSpec spec =
+      KernelLoaderSpec::CreateCudaCubinInMemorySpec(binary, "AddI32", 3);
   RunAddI32Kernel(spec);
 }
 
 TEST_F(GpuKernelTest, LoadAndRunKernelFromSymbol) {
-  RunAddI32Kernel(GetAddI32KernelSpec());
+  TF_ASSERT_OK_AND_ASSIGN(
+      KernelLoaderSpec spec,
+      GetAddI32TestKernelSpec(executor_->GetPlatform()->id()));
+  RunAddI32Kernel(spec);
+}
+
+TEST_F(GpuKernelTest, ArrayArgByValue) {
+  TF_ASSERT_OK_AND_ASSIGN(auto stream, executor_->CreateStream());
+  TF_ASSERT_OK_AND_ASSIGN(auto kernel, LoadCopyTestKernel(executor_));
+
+  constexpr int64_t kLength = 16;
+
+  DeviceMemory<char> dst = executor_->AllocateArray<char>(kLength, 0);
+  TF_ASSERT_OK(stream->MemZero(&dst, kLength));
+
+  std::array<std::byte, 16> storage;
+  int i = 0;
+  for (auto& element : storage) {
+    element = static_cast<std::byte>(i++);
+  }
+
+  // Launch kernel.
+  auto args = stream_executor::PackKernelArgs(/*shmem_bytes=*/0, dst, storage);
+  TF_ASSERT_OK(kernel->Launch(ThreadDim(), BlockDim(), stream.get(), *args));
+
+  // Copy data back to host.
+  std::byte dst_host[16] = {};
+  TF_ASSERT_OK(stream->Memcpy(dst_host, dst, kLength));
+  TF_ASSERT_OK(stream->BlockHostUntilDone());
+
+  EXPECT_THAT(dst_host, ::testing::ElementsAreArray(storage));
+}
+
+TEST_F(GpuKernelTest, TmaLoadAndRunKernelFromPtx) {
+  if (!IsTmaAvailableForDevice(executor_->GetDeviceDescription())) {
+    GTEST_SKIP() << "TMA is not supported on this platform.";
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(auto stream, executor_->CreateStream());
+  TF_ASSERT_OK_AND_ASSIGN(auto tma_kernel,
+                          TmaKernel::Create(executor_, GetTmaPtxKernelSpec()));
+
+  auto get_tma_descriptor_from_proto =
+      [](absl::string_view proto) -> absl::StatusOr<TmaDescriptor> {
+    TmaDescriptorProto tma_descriptor_proto;
+    tsl::protobuf::TextFormat::ParseFromString(proto, &tma_descriptor_proto);
+    return TmaDescriptor::FromProto(tma_descriptor_proto);
+  };
+
+  TF_ASSERT_OK_AND_ASSIGN(TmaDescriptor arg0_desc,
+                          get_tma_descriptor_from_proto(
+                              R"pb(
+                                element_size: 2
+                                global_dims: 512
+                                global_dims: 1024
+                                global_strides: 1024
+                                box_dims: 64
+                                box_dims: 16
+                                element_strides: 1
+                                element_strides: 1
+                                swizzle: SWIZZLE_BYTES128
+                                l2_promotion: L2_PROMOTION_BYTES128
+                              )pb"));
+
+  TF_ASSERT_OK_AND_ASSIGN(TmaDescriptor arg1_desc,
+                          get_tma_descriptor_from_proto(
+                              R"pb(
+                                element_size: 2
+                                global_dims: 1024
+                                global_dims: 512
+                                global_strides: 2048
+                                box_dims: 16
+                                box_dims: 128
+                                element_strides: 1
+                                element_strides: 1
+                                swizzle: SWIZZLE_BYTES32
+                                l2_promotion: L2_PROMOTION_BYTES128
+                              )pb"));
+
+  TF_ASSERT_OK_AND_ASSIGN(TmaDescriptor arg2_desc,
+                          get_tma_descriptor_from_proto(
+                              R"pb(
+                                element_size: 4
+                                global_dims: 1024
+                                global_dims: 1024
+                                global_strides: 4096
+                                box_dims: 16
+                                box_dims: 16
+                                element_strides: 1
+                                element_strides: 1
+                                swizzle: SWIZZLE_BYTES64
+                                l2_promotion: L2_PROMOTION_BYTES128
+                              )pb"));
+
+  DeviceMemory<int16_t> mem0 = executor_->AllocateArray<int16_t>(512 * 1024);
+  DeviceMemory<int16_t> mem1 = executor_->AllocateArray<int16_t>(1024 * 512);
+  DeviceMemory<int32_t> mem2 = executor_->AllocateArray<int32_t>(1024 * 1024);
+
+  TF_ASSERT_OK_AND_ASSIGN(auto tma0,
+                          executor_->CreateTensorMap(arg0_desc, mem0.opaque()));
+  TF_ASSERT_OK_AND_ASSIGN(auto tma1,
+                          executor_->CreateTensorMap(arg1_desc, mem1.opaque()));
+  TF_ASSERT_OK_AND_ASSIGN(auto tma2,
+                          executor_->CreateTensorMap(arg2_desc, mem2.opaque()));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<KernelArgs> packed_args,
+      stream_executor::PackKernelArgs(
+          absl::Span<const stream_executor::KernelArgument>({tma0, tma1, tma2}),
+          tma_kernel->metadata()));
+  TF_ASSERT_OK(
+      tma_kernel->Launch(ThreadDim(), BlockDim(), stream.get(), *packed_args));
+  TF_ASSERT_OK(stream->BlockHostUntilDone());
 }
 
 }  // namespace

@@ -17,14 +17,13 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include "xla/hlo/testlib/filecheck.h"
-#include "xla/tests/hlo_test_base.h"
-#include "tsl/platform/test.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 
 namespace xla {
 namespace gpu {
 namespace {
 
-class SwapOperandsTest : public HloTestBase {};
+class SwapOperandsTest : public HloHardwareIndependentTestBase {};
 
 TEST_F(SwapOperandsTest, CodeGeneratingMovesToLhs) {
   auto module = ParseAndReturnVerifiedModule(R"(

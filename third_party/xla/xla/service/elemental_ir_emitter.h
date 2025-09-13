@@ -143,6 +143,9 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
   llvm::Value* EmitIntegralMin(llvm::Value* lhs_value, llvm::Value* rhs_value,
                                bool is_signed);
 
+  virtual absl::StatusOr<llvm::Value*> EmitAcosh(PrimitiveType prim_type,
+                                                 llvm::Value* value);
+
   virtual absl::StatusOr<llvm::Value*> EmitAtan2(PrimitiveType prim_type,
                                                  llvm::Value* lhs,
                                                  llvm::Value* rhs,
@@ -351,11 +354,6 @@ class ElementalIrEmitterForTests : public ElementalIrEmitter {
 
   HloToElementGeneratorMap generator_map_;
 };
-
-absl::StatusOr<llvm::Value*> EmitReducePrecisionIR(
-    PrimitiveType src_ty, llvm::Value* x, int64_t dest_exponent_bits,
-    int64_t dest_mantissa_bits, bool quiet_nans, llvm::IRBuilderBase* b);
-
 }  // namespace xla
 
 #endif  // XLA_SERVICE_ELEMENTAL_IR_EMITTER_H_

@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "xla/service/while_loop_invariant_code_motion.h"
 
+#include <cstdint>
+#include <memory>
+
 #include "absl/log/log.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -22,12 +25,12 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/test.h"
 #include "xla/hlo/utils/hlo_matchers.h"
 #include "xla/literal_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/test.h"
-#include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/statusor.h"
@@ -37,7 +40,7 @@ namespace {
 
 namespace op = xla::testing::opcode_matchers;
 
-class WhileLoopInvariantCodeMotionTest : public HloTestBase {
+class WhileLoopInvariantCodeMotionTest : public HloHardwareIndependentTestBase {
  public:
   // Makes a computation which has one parameter, of the given shape, and always
   // returns PRED[]{true}.  This is useful as a dummy loop condition.
@@ -714,6 +717,55 @@ TEST_F(WhileLoopInvariantCodeMotionTest, DoesNotHoistShardingCustomCalls) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(kHloModule));
 
+  TF_ASSERT_OK_AND_ASSIGN(bool simplified_loop,
+                          WhileLoopInvariantCodeMotion{}.Run(module.get()));
+  EXPECT_FALSE(simplified_loop);
+}
+
+TEST_F(WhileLoopInvariantCodeMotionTest, RespectFrontendAttrDisablingHoisting) {
+  const char* const kHloModule = R"(
+  HloModule jit_countdown, entry_computation_layout={(f32[]{:T(128)}, f32[]{:T(128)}, f32[10,10]{1,0:T(8,128)})->(f32[]{:T(128)}, f32[]{:T(128)}, f32[10,10]{1,0:T(8,128)})}
+
+  %region_1.4 (Arg_0.5: f32[], Arg_1.6: f32[]) -> f32[] {
+    %Arg_0.5 = f32[] parameter(0)
+    %Arg_1.6 = f32[] parameter(1)
+    ROOT %add.7 = f32[] add(%Arg_0.5, %Arg_1.6)
+  }
+
+  %region_0.8 (arg_tuple.9: (f32[], f32[], f32[10,10])) -> (f32[], f32[], f32[10,10]) {
+    %arg_tuple.9 = (f32[], f32[], f32[10,10]{1,0}) parameter(0)
+    %get-tuple-element.10 = f32[] get-tuple-element(%arg_tuple.9), index=0
+    %constant.14 = f32[] constant(1)
+    %negate = f32[] negate(%constant.14)
+    %add = f32[] add(%get-tuple-element.10, %negate)
+    %get-tuple-element.11 = f32[] get-tuple-element(%arg_tuple.9), index=1
+    %get-tuple-element.12 = f32[10,10]{1,0} get-tuple-element(%arg_tuple.9), index=2
+    %constant.13 = f32[] constant(0)
+    %reduce.16 = f32[] reduce(%get-tuple-element.12, %constant.13), dimensions={0,1}, to_apply=%region_1.4
+    %add.17 = f32[] add(%get-tuple-element.11, %reduce.16)
+    ROOT %tuple.18 = (f32[], f32[], f32[10,10]{1,0}) tuple(%add, %add.17, %get-tuple-element.12)
+  }
+
+  %region_2.19 (arg_tuple.20: (f32[], f32[], f32[10,10])) -> pred[] {
+    %arg_tuple.20 = (f32[], f32[], f32[10,10]{1,0}) parameter(0)
+    %get-tuple-element.21 = f32[] get-tuple-element(%arg_tuple.20), index=0
+    %constant.24 = f32[] constant(0)
+    ROOT %compare.25 = pred[] compare(%get-tuple-element.21, %constant.24), direction=GT
+  }
+
+  ENTRY %main.40 (Arg_0.1: f32[], Arg_1.2: f32[], Arg_2.3: f32[10,10]) -> (f32[], f32[], f32[10,10]) {
+    %Arg_0.1 = f32[] parameter(0)
+    %Arg_1.2 = f32[] parameter(1)
+    %Arg_2.3 = f32[10,10]{1,0} parameter(2)
+    %tuple.0 = (f32[], f32[], f32[10,10]{1,0}) tuple(%Arg_0.1, %Arg_1.2, %Arg_2.3)
+    %while.0 = (f32[], f32[], f32[10,10]{1,0}) while(%tuple.0), condition=%region_2.19, body=%region_0.8, frontend_attributes={_xla_disable_loop_instr_hoisting="true"}
+    %get-tuple-element.36 = f32[] get-tuple-element(%while.0), index=0
+    %get-tuple-element.37 = f32[] get-tuple-element(%while.0), index=1
+    ROOT %tuple.39 = (f32[], f32[], f32[10,10]{1,0}) tuple(%get-tuple-element.36, %get-tuple-element.37, %Arg_2.3)
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kHloModule));
   TF_ASSERT_OK_AND_ASSIGN(bool simplified_loop,
                           WhileLoopInvariantCodeMotion{}.Run(module.get()));
   EXPECT_FALSE(simplified_loop);

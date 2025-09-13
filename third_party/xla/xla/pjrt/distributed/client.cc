@@ -34,9 +34,9 @@ limitations under the License.
 #include "xla/tsl/distributed_runtime/coordination/coordination_client.h"
 #include "xla/tsl/distributed_runtime/coordination/coordination_service_agent.h"
 #include "xla/tsl/distributed_runtime/rpc/coordination/grpc_coordination_client.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/protobuf/coordination_config.pb.h"
 #include "xla/tsl/protobuf/coordination_service.pb.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 
@@ -55,6 +55,8 @@ class DistributedRuntimeCoordinationServiceClient
   absl::StatusOr<std::string> BlockingKeyValueGet(
       absl::string_view key, absl::Duration timeout) override;
   absl::StatusOr<std::string> KeyValueTryGet(absl::string_view key) override;
+  absl::StatusOr<int64_t> KeyValueIncrement(absl::string_view key,
+                                            int64_t increment) override;
   absl::StatusOr<std::vector<std::pair<std::string, std::string>>>
   KeyValueDirGet(absl::string_view key) override;
   absl::Status KeyValueSet(absl::string_view key,
@@ -86,8 +88,8 @@ DistributedRuntimeCoordinationServiceClient::
   config.set_service_leader("/job:jax_worker/task:0");
   config.set_cluster_register_timeout_in_ms(
       absl::ToInt64Milliseconds(options.init_timeout));
-  config.set_heartbeat_timeout_in_ms(absl::ToInt64Milliseconds(
-      options.heartbeat_interval * options.max_missing_heartbeats));
+  config.set_heartbeat_timeout_in_ms(
+      absl::ToInt64Milliseconds(options.heartbeat_timeout));
   config.set_cluster_register_with_barrier(true);
   config.set_shutdown_barrier_timeout_in_ms(
       absl::ToInt64Milliseconds(options.shutdown_timeout));
@@ -95,15 +97,14 @@ DistributedRuntimeCoordinationServiceClient::
       !options.shutdown_on_destruction);
   config.set_poll_for_error_from_service_at_startup(
       options.poll_for_error_from_service_at_startup);
-  auto error_fn = [timeout_fn = options.missed_heartbeat_callback](
-                      const absl::Status& status) { timeout_fn(status); };
 
   std::unique_ptr<tsl::CoordinationClient> leader_client;
   leader_client.reset(tsl::NewGrpcCoordinationClient(channel));
   coord_agent_ = tsl::CreateCoordinationServiceAgent();
-  const absl::Status status =
-      coord_agent_->Initialize(options.env, "jax_worker", options.node_id,
-                               config, std::move(leader_client), error_fn);
+  const absl::Status status = coord_agent_->Initialize(
+      options.env, "jax_worker", options.node_id, config,
+      std::move(leader_client), options.missed_heartbeat_callback,
+      options.recoverable);
   if (!status.ok()) {
     LOG(ERROR) << "Coordination agent failed to initialize: " << status;
   }
@@ -152,6 +153,12 @@ absl::StatusOr<std::string>
 DistributedRuntimeCoordinationServiceClient::KeyValueTryGet(
     absl::string_view key) {
   return coord_agent_->TryGetKeyValue(key);
+}
+
+absl::StatusOr<int64_t>
+DistributedRuntimeCoordinationServiceClient::KeyValueIncrement(
+    absl::string_view key, int64_t increment) {
+  return coord_agent_->IncrementKeyValue(key, increment);
 }
 
 absl::StatusOr<std::vector<std::pair<std::string, std::string>>>

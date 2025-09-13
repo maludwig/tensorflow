@@ -56,6 +56,7 @@ limitations under the License.
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/Support/TypeSize.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -85,18 +86,6 @@ namespace llvm_ir {
 
 namespace {
 
-// This works for most llvm / mlir types. This also accepts a const pointer to
-// objects which have a const print() method.
-template <typename T>
-std::string DumpToStringTempl(T* entity) {
-  CHECK_NE(entity, nullptr);
-
-  std::string s;
-  llvm::raw_string_ostream ostream(s);
-  ostream << *entity;
-  return s;
-}
-
 // Note, this function is only useful in an insertion context; in a global
 // (e.g. constants) context it will CHECK fail.
 llvm::Module* ModuleFromIRBuilder(llvm::IRBuilderBase* b) {
@@ -106,29 +95,50 @@ llvm::Module* ModuleFromIRBuilder(llvm::IRBuilderBase* b) {
   return module;
 }
 
+PrimitiveType PrimitiveTypeFromIrIntegerType(
+    llvm::IntegerType* type, bool default_to_signed_for_integers) {
+  // PRED (boolean) is typically a 1-bit integer.
+  if (type->getBitWidth() == 1) {
+    return PRED;
+  }
+
+  // LLVM's llvm::IntegerType (e.g., i8, i32) does not distinguish between
+  // signed and unsigned types by itself. The interpretation (signed/unsigned)
+  // depends on the operations using these types (e.g., sdiv vs. udiv).
+  // The 'default_to_signed_for_integers' flag helps make a choice here.
+  switch (type->getBitWidth()) {
+    case 8:
+      return default_to_signed_for_integers ? S8 : U8;
+    case 16:
+      return default_to_signed_for_integers ? S16 : U16;
+    case 32:
+      return default_to_signed_for_integers ? S32 : U32;
+    case 64:
+      return default_to_signed_for_integers ? S64 : U64;
+    default:
+      return PRIMITIVE_TYPE_INVALID;
+  }
+}
+
+std::optional<PrimitiveType> PrimitiveComplexTypeFromIrStructType(
+    llvm::StructType* struct_type) {
+  // XLA C64 is typically represented as an LLVM struct {float, float}.
+  // XLA C128 is typically represented as an LLVM struct {double, double}.
+  if (struct_type->getNumElements() == 2) {
+    llvm::Type* el_type0 = struct_type->getElementType(0);
+    llvm::Type* el_type1 = struct_type->getElementType(1);
+    if (el_type0->isFloatTy() && el_type1->isFloatTy()) {
+      return C64;  // Complex64
+    }
+    if (el_type0->isDoubleTy() && el_type1->isDoubleTy()) {
+      return C128;  // Complex128
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
-std::string DumpToString(const llvm::Module* module) {
-  return DumpToStringTempl(module);
-}
-
-std::string DumpToString(const llvm::Type* type) {
-  return DumpToStringTempl(type);
-}
-
-std::string DumpToString(const llvm::Value* value) {
-  return DumpToStringTempl(value);
-}
-
-std::string DumpToString(mlir::Operation* operation) {
-  return DumpToStringTempl(operation);
-}
-
-std::string DumpToString(mlir::Type type) { return DumpToStringTempl(&type); }
-
-std::string DumpToString(mlir::Value value) {
-  return DumpToStringTempl(&value);
-}
 
 llvm::CallInst* EmitCallToIntrinsic(
     llvm::Intrinsic::ID intrinsic_id, absl::Span<llvm::Value* const> operands,
@@ -137,7 +147,7 @@ llvm::CallInst* EmitCallToIntrinsic(
   llvm::Module* module = ModuleFromIRBuilder(b);
   llvm::Function* intrinsic = llvm::Intrinsic::getOrInsertDeclaration(
       module, intrinsic_id, AsArrayRef(overloaded_types));
-  return b->CreateCall(intrinsic, AsArrayRef(operands), name.data());
+  return b->CreateCall(intrinsic, AsArrayRef(operands), AsStringRef(name));
 }
 
 llvm::Value* EmitFloatMax(llvm::Value* lhs_value, llvm::Value* rhs_value,
@@ -145,7 +155,7 @@ llvm::Value* EmitFloatMax(llvm::Value* lhs_value, llvm::Value* rhs_value,
                           absl::string_view name) {
   if (b->getFastMathFlags().noNaNs() || enable_fast_min_max) {
     auto cmp = b->CreateFCmpUGE(lhs_value, rhs_value);
-    return b->CreateSelect(cmp, lhs_value, rhs_value, name.data());
+    return b->CreateSelect(cmp, lhs_value, rhs_value, AsStringRef(name));
   }
   return llvm_ir::EmitCallToIntrinsic(llvm::Intrinsic::maximum,
                                       {lhs_value, rhs_value},
@@ -157,7 +167,7 @@ llvm::Value* EmitFloatMin(llvm::Value* lhs_value, llvm::Value* rhs_value,
                           absl::string_view name) {
   if (b->getFastMathFlags().noNaNs() || enable_fast_min_max) {
     auto cmp = b->CreateFCmpULE(lhs_value, rhs_value);
-    return b->CreateSelect(cmp, lhs_value, rhs_value, name.data());
+    return b->CreateSelect(cmp, lhs_value, rhs_value, AsStringRef(name));
   }
   return llvm_ir::EmitCallToIntrinsic(llvm::Intrinsic::minimum,
                                       {lhs_value, rhs_value},
@@ -265,6 +275,51 @@ llvm::Type* PrimitiveTypeToIrType(PrimitiveType element_type,
   }
 }
 
+PrimitiveType PrimitiveTypeFromIrType(llvm::Type* type,
+                                      bool default_to_signed_for_integers) {
+  if (!type) {
+    return PRIMITIVE_TYPE_INVALID;
+  }
+
+  // If it's a vector type, XLA PrimitiveType refers to the element type.
+  // So, we get the underlying element type for further checks.
+  if (type->isVectorTy()) {
+    type = llvm::cast<llvm::VectorType>(type)->getElementType();
+  }
+
+  // Floating-point types
+  if (type->isHalfTy()) {
+    return F16;
+  }
+  if (type->isBFloatTy()) {
+    return BF16;
+  }
+  if (type->isFloatTy()) {
+    return F32;
+  }
+  if (type->isDoubleTy()) {
+    return F64;
+  }
+
+  if (type->isIntegerTy()) {
+    return PrimitiveTypeFromIrIntegerType(llvm::cast<llvm::IntegerType>(type),
+                                          default_to_signed_for_integers);
+  }
+
+  if (type->isStructTy()) {
+    if (auto result = PrimitiveComplexTypeFromIrStructType(
+            llvm::cast<llvm::StructType>(type))) {
+      return *result;
+    }
+  }
+
+  if (type->isPointerTy()) {
+    return OPAQUE_TYPE;
+  }
+
+  return PRIMITIVE_TYPE_INVALID;
+}
+
 int GetSizeInBits(llvm::Type* type) {
   const llvm::StructType* struct_ty = llvm::dyn_cast<llvm::StructType>(type);
   if (struct_ty) {
@@ -285,7 +340,8 @@ llvm::Type* ShapeToIrType(const Shape& shape, llvm::LLVMContext& context) {
       PrimitiveTypeToIrType(shape.element_type(), context);
   if (shape.IsTuple()) {
     // A tuple buffer is an array of pointers.
-    result_type = llvm::ArrayType::get(result_type, shape.tuple_shapes_size());
+    result_type =
+        llvm::ArrayType::get(result_type, shape.tuple_shapes().size());
   } else if (shape.IsArray()) {
     for (int64_t dimension : LayoutUtil::MinorToMajor(shape)) {
       result_type =
@@ -297,7 +353,7 @@ llvm::Type* ShapeToIrType(const Shape& shape, llvm::LLVMContext& context) {
 
 absl::StatusOr<llvm::Value*> EncodeSelfDescribingShapeConstant(
     const Shape& shape, int32_t* shape_size, llvm::IRBuilderBase* b) {
-  std::string encoded_shape = shape.SerializeAsString();
+  const std::string encoded_shape = shape.ToProto().SerializeAsString();
   if (encoded_shape.size() > std::numeric_limits<int32_t>::max()) {
     return Internal("Encoded shape size exceeded int32_t size limit.");
   }
@@ -467,10 +523,10 @@ llvm::Value* EmitComparison(llvm::CmpInst::Predicate predicate,
   llvm::Value* comparison_result;
   if (lhs_value->getType()->isIntegerTy()) {
     comparison_result =
-        b->CreateICmp(predicate, lhs_value, rhs_value, name.data());
+        b->CreateICmp(predicate, lhs_value, rhs_value, AsStringRef(name));
   } else {
     comparison_result =
-        b->CreateFCmp(predicate, lhs_value, rhs_value, name.data());
+        b->CreateFCmp(predicate, lhs_value, rhs_value, AsStringRef(name));
   }
   // comparison_result is i1, but the NVPTX codegen incorrectly lowers i1
   // arrays. So we extend it to i8 so that it's addressable.
@@ -808,6 +864,154 @@ void EmitEarlyReturn(llvm::Value* condition, llvm::IRBuilderBase* b,
 
   b->CreateCondBr(condition, continued, return_block);
   b->SetInsertPoint(continued, continued->getFirstInsertionPt());
+}
+
+absl::StatusOr<llvm::Value*> EmitReducePrecisionIR(
+    PrimitiveType src_ty, llvm::Value* x, int64_t dest_exponent_bits,
+    int64_t dest_mantissa_bits, bool quiet_nans, llvm::IRBuilderBase* b) {
+  using llvm::APInt;
+
+  if (!primitive_util::IsFloatingPointType(src_ty)) {
+    return Unimplemented(
+        "ReducePrecision cannot accept non-floating-point type %s.",
+        PrimitiveType_Name(src_ty));
+  }
+
+  // Integer and float types for casting and constant generation.
+  llvm::Type* const value_type = x->getType();
+  llvm::Type* const float_scalar_type = value_type->getScalarType();
+  const int nbits = float_scalar_type->getPrimitiveSizeInBits();
+  llvm::Type* int_work_type = b->getIntNTy(nbits);
+  unsigned width = 1;
+  if (auto* vec_ty = llvm::dyn_cast<llvm::FixedVectorType>(value_type)) {
+    width = vec_ty->getNumElements();
+    int_work_type = llvm::VectorType::get(int_work_type,
+                                          llvm::ElementCount::getFixed(width));
+  }
+
+  // Helper to create a splatted vector constant. If the input is scalar, this
+  // will just produce a scalar ConstantInt.
+  auto int_const = [&](const APInt& val) -> llvm::Constant* {
+    return llvm::ConstantInt::get(int_work_type, val);
+  };
+
+  // SignificandWidth includes the implicit extra bit.
+  int src_mantissa_bits = primitive_util::SignificandWidth(src_ty) - 1;
+  int src_exponent_bits = nbits - 1 - src_mantissa_bits;
+
+  // Cast the input value to an integer for bitwise manipulation.
+  llvm::Value* x_as_int = b->CreateBitCast(x, int_work_type);
+
+  // Clear the sign bit, it does not participate in rounding and we will restore
+  // it later.
+  APInt sign_bit_mask(nbits, 1);
+  sign_bit_mask <<= nbits - 1;
+  llvm::Value* x_abs_bits = b->CreateAnd(x_as_int, int_const(~sign_bit_mask));
+
+  APInt exp_bits_mask(nbits, 1);
+  exp_bits_mask = ((exp_bits_mask << src_exponent_bits) - 1)
+                  << src_mantissa_bits;
+  auto x_is_nan = b->CreateICmpUGT(x_abs_bits, int_const(exp_bits_mask));
+
+  if (dest_mantissa_bits < src_mantissa_bits) {
+    // Last remaining mantissa bit.
+    APInt last_mantissa_bit_mask(nbits, 1);
+    last_mantissa_bit_mask <<= src_mantissa_bits - dest_mantissa_bits;
+
+    // Compute rounding bias for round-to-nearest with ties to even.  This is
+    // equal to a base value of 0111... plus one bit if the last remaining
+    // mantissa bit is 1.
+    APInt base_rounding_bias = last_mantissa_bit_mask.lshr(1) - 1;
+    llvm::Value* x_last_mantissa_bit =
+        b->CreateLShr(b->CreateAnd(x_as_int, int_const(last_mantissa_bit_mask)),
+                      (src_mantissa_bits - dest_mantissa_bits));
+    llvm::Value* x_rounding_bias =
+        b->CreateAdd(x_last_mantissa_bit, int_const(base_rounding_bias));
+
+    // Add rounding bias, and mask out truncated bits.  Note that the case
+    // where adding the rounding bias overflows into the exponent bits is
+    // correct; the non-masked mantissa bits will all be zero, and the
+    // exponent will be incremented by one.
+    APInt truncation_mask = ~(last_mantissa_bit_mask - 1);
+    llvm::Value* x_rounded = b->CreateAdd(x_as_int, x_rounding_bias);
+    x_rounded = b->CreateAnd(x_rounded, int_const(truncation_mask));
+    if (quiet_nans) {
+      x_as_int = b->CreateSelect(x_is_nan, x_as_int, x_rounded);
+    } else {
+      x_as_int = x_rounded;
+    }
+  }
+
+  if (dest_exponent_bits < src_exponent_bits) {
+    // An exponent of 2^(n-1)-1 -- that is, 0111... with the zero in the most-
+    // significant bit -- is equal to 1.0f for all exponent sizes.  Adding
+    // 2^(n-1)-1 to this gives us the highest non-infinite exponent for a bit-
+    // size of n, and subtracting 2^(n-1)-1 from this gives us the lowest'
+    // exponent (corresponding to 0.0f).
+    //
+    // Thus, the f32 exponent corresponding to the highest non-infinite
+    // exponent for a bit size of n is (2^7-1) + 2^(n-1)-1, and the f32
+    // exponent corresponding to the lowest exponent for a bit size of n is
+    // (2^7-1) - 2^(n-1)-1.
+    //
+    // Note that we have already checked that exponents_bits >= 1.
+    APInt exponent_bias(nbits, 1);
+    exponent_bias = (exponent_bias << (src_exponent_bits - 1)) - 1;
+
+    APInt reduced_exponent_bias(nbits, 1);
+    reduced_exponent_bias =
+        (reduced_exponent_bias << (dest_exponent_bits - 1)) - 1;
+
+    APInt reduced_max_exponent = exponent_bias + reduced_exponent_bias;
+    APInt reduced_min_exponent = exponent_bias - reduced_exponent_bias;
+
+    // Do we overflow or underflow?
+    llvm::Value* x_exponent = b->CreateAnd(x_as_int, int_const(exp_bits_mask));
+    llvm::Value* x_overflows = b->CreateICmpUGT(
+        x_exponent, int_const(reduced_max_exponent << src_mantissa_bits));
+    llvm::Value* x_underflows = b->CreateICmpULE(
+        x_exponent, int_const(reduced_min_exponent << src_mantissa_bits));
+
+    // Compute appropriately-signed values of zero and infinity.
+    llvm::Value* x_signed_zero =
+        b->CreateAnd(x_as_int, int_const(sign_bit_mask));
+    llvm::Value* x_signed_inf =
+        b->CreateOr(x_signed_zero, int_const(exp_bits_mask));
+
+    // Force to zero or infinity if overflow or underflow.  (Note that this
+    // truncates all denormal values to zero, rather than rounding them.)
+    x_as_int = b->CreateSelect(x_overflows, x_signed_inf, x_as_int);
+    x_as_int = b->CreateSelect(x_underflows, x_signed_zero, x_as_int);
+  }
+
+  // Cast the result back to a floating-point type.
+  llvm::Value* result = b->CreateBitCast(x_as_int, value_type);
+
+  // Correct result for NaN inputs.
+  //
+  // The exponent handling will "normalize" NaN values to infinities, which is
+  // undesirable (except in the case with no mantissa bits, in which case it
+  // is mandatory).  This logic also handles cases where mantissa-rounding
+  // causes a NaN's mantissa to overflow into the exponent bits, which would
+  // otherwise create an erroneous zero value.
+
+  if (dest_mantissa_bits > 0) {
+    if (quiet_nans) {
+      APInt qnan_mask(nbits, 1);
+      qnan_mask <<= src_mantissa_bits - 1;
+      llvm::Value* x_with_qnan_bit_set =
+          b->CreateOr(x_as_int, int_const(qnan_mask));
+      x_with_qnan_bit_set = b->CreateBitCast(x_with_qnan_bit_set, value_type);
+      result = b->CreateSelect(x_is_nan, x_with_qnan_bit_set, result);
+    } else {
+      result = b->CreateSelect(x_is_nan, x, result);
+    }
+  } else {
+    result = b->CreateSelect(x_is_nan,
+                             llvm::ConstantFP::getInfinity(value_type), result);
+  }
+
+  return result;
 }
 
 }  // namespace llvm_ir

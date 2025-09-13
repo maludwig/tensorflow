@@ -14,11 +14,11 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/common_runtime/buf_rendezvous.h"
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
@@ -84,7 +84,7 @@ TEST_F(BufRendezvousTest, CorrectUseProducerFirst) {
   absl::Status cons_status;
   bool prod_callback_called = false;
   bool cons_callback_called = false;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&note, &prod_status, &prod_callback_called](const absl::Status& s) {
@@ -119,7 +119,7 @@ TEST_F(BufRendezvousTest, CorrectUseConsumerFirst) {
   absl::Status cons_status;
   bool prod_callback_called = false;
   bool cons_callback_called = false;
-  Notification note;
+  absl::Notification note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [this, &cons_status, &cons_callback_called](const absl::Status& s,
@@ -158,7 +158,7 @@ TEST_F(BufRendezvousTest, ErrorDuplicatePut) {
       },
       &cm_);
   absl::Status bad_status;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&bad_status, &note](const absl::Status& s) {
@@ -193,8 +193,8 @@ TEST_F(BufRendezvousTest, ErrorDeleteNonEmpty) {
 TEST_F(BufRendezvousTest, AbortNonEmpty) {
   absl::Status cons_status;
   absl::Status prod_status;
-  Notification prod_note;
-  Notification cons_note;
+  absl::Notification prod_note;
+  absl::Notification cons_note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&cons_note, &cons_status](const absl::Status& s,
@@ -227,8 +227,8 @@ TEST_F(BufRendezvousTest, UseAfterAbort) {
   br_->StartAbort(errors::Internal("Falling sky detected"));
   absl::Status cons_status;
   absl::Status prod_status;
-  Notification prod_note;
-  Notification cons_note;
+  absl::Notification prod_note;
+  absl::Notification cons_note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&cons_note, &cons_status](const absl::Status& s,
@@ -254,7 +254,7 @@ TEST_F(BufRendezvousTest, UseAfterAbort) {
 
 TEST_F(BufRendezvousTest, DeviceIncarnationMismatch) {
   absl::Status cons_status;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [](const absl::Status&) {}, /*cancellation_manager=*/nullptr);
@@ -267,12 +267,12 @@ TEST_F(BufRendezvousTest, DeviceIncarnationMismatch) {
       },
       /*cancellation_manager=*/nullptr);
   note.WaitForNotification();
-  EXPECT_TRUE(errors::IsFailedPrecondition(cons_status));
+  EXPECT_TRUE(absl::IsFailedPrecondition(cons_status));
 }
 
 TEST_F(BufRendezvousTest, ProvideThenCancel) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&status, &note](const absl::Status& s) {
@@ -282,7 +282,7 @@ TEST_F(BufRendezvousTest, ProvideThenCancel) {
       &cm_);
   cm_.StartCancel();
   note.WaitForNotification();
-  EXPECT_TRUE(errors::IsCancelled(status));
+  EXPECT_TRUE(absl::IsCancelled(status));
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
@@ -291,7 +291,7 @@ TEST_F(BufRendezvousTest, ProvideThenCancel) {
 
 TEST_F(BufRendezvousTest, CancelThenProvide) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   cm_.StartCancel();
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
@@ -301,7 +301,7 @@ TEST_F(BufRendezvousTest, CancelThenProvide) {
       },
       &cm_);
   note.WaitForNotification();
-  EXPECT_TRUE(errors::IsCancelled(status));
+  EXPECT_TRUE(absl::IsCancelled(status));
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
@@ -310,7 +310,7 @@ TEST_F(BufRendezvousTest, CancelThenProvide) {
 
 TEST_F(BufRendezvousTest, ConsumeThenCancel) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&status, &note](const absl::Status& s, BufRendezvous::Hook* h) {
@@ -320,7 +320,7 @@ TEST_F(BufRendezvousTest, ConsumeThenCancel) {
       &cm_);
   cm_.StartCancel();
   note.WaitForNotification();
-  EXPECT_TRUE(errors::IsCancelled(status));
+  EXPECT_TRUE(absl::IsCancelled(status));
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
@@ -329,7 +329,7 @@ TEST_F(BufRendezvousTest, ConsumeThenCancel) {
 
 TEST_F(BufRendezvousTest, CancelThenConsume) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   cm_.StartCancel();
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
@@ -339,7 +339,7 @@ TEST_F(BufRendezvousTest, CancelThenConsume) {
       },
       &cm_);
   note.WaitForNotification();
-  EXPECT_TRUE(errors::IsCancelled(status));
+  EXPECT_TRUE(absl::IsCancelled(status));
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
@@ -351,7 +351,7 @@ TEST_F(BufRendezvousTest, ProvideConsumeThenCancel) {
   absl::Status cons_status;
   bool prod_callback_called = false;
   bool cons_callback_called = false;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&note, &prod_status, &prod_callback_called](const absl::Status& s) {
@@ -392,23 +392,23 @@ TEST_F(BufRendezvousTest, CancelThenProvideConsume) {
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&prod_status, &prod_callback_called](const absl::Status& s) {
         prod_status = s;
-        EXPECT_TRUE(errors::IsCancelled(prod_status));
+        EXPECT_TRUE(absl::IsCancelled(prod_status));
         prod_callback_called = true;
       },
       &cm_);
   EXPECT_TRUE(prod_callback_called);
-  EXPECT_TRUE(errors::IsCancelled(prod_status));
+  EXPECT_TRUE(absl::IsCancelled(prod_status));
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&cons_status, &cons_callback_called](const absl::Status& s,
                                             BufRendezvous::Hook* h) {
         cons_status = s;
-        EXPECT_TRUE(errors::IsCancelled(cons_status));
+        EXPECT_TRUE(absl::IsCancelled(cons_status));
         cons_callback_called = true;
       },
       &cm_);
   EXPECT_TRUE(cons_callback_called);
-  EXPECT_TRUE(errors::IsCancelled(cons_status));
+  EXPECT_TRUE(absl::IsCancelled(cons_status));
 }
 
 }  // namespace

@@ -33,7 +33,7 @@ class Allocation {
  public:
   using Ptr = std::unique_ptr<Allocation>;
 
-  virtual ~Allocation() {}
+  virtual ~Allocation() = default;
 
   enum class Type {
     kMMap,
@@ -65,6 +65,11 @@ class MMAPAllocation : public Allocation {
  public:
   /// Loads and maps the provided file to a memory region.
   MMAPAllocation(const char* filename, ErrorReporter* error_reporter);
+
+  /// Loads and maps the provided file to a memory region at the given
+  // offset and length (both in bytes).
+  MMAPAllocation(const char* filename, size_t offset, size_t length,
+                 ErrorReporter* error_reporter);
 
   /// Maps the provided file descriptor to a memory region.
   /// Note: The provided file descriptor will be dup'ed for usage; the caller

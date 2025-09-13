@@ -12,6 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include "tensorflow/compiler/mlir/stablehlo/transforms/fold_broadcast_pass.h"
 
 #include <cstdint>
 #include <functional>
@@ -35,7 +36,6 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
-#include "tensorflow/compiler/mlir/stablehlo/transforms/stablehlo_passes.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 
 namespace mlir {
@@ -206,7 +206,7 @@ class FoldBroadcastInDimBeforeBinaryElementwiseOp
       return rewriter.notifyMatchFailure(bcast_op, "Unsupported element type.");
     }
     Value new_const_op =
-        rewriter.create<mhlo::ConstantOp>(bcast_op.getLoc(), result);
+        mhlo::ConstantOp::create(rewriter, bcast_op.getLoc(), result);
     rewriter.replaceOp(bcast_op, {new_const_op});
     return success();
   }
@@ -231,7 +231,7 @@ LogicalResult ConstantFoldMul(mhlo::MulOp op, PatternRewriter &rewriter) {
             &op);
   }
   if (result == Attribute()) return failure();
-  Value new_const_op = rewriter.create<mhlo::ConstantOp>(op.getLoc(), result);
+  Value new_const_op = mhlo::ConstantOp::create(rewriter, op.getLoc(), result);
   rewriter.replaceOp(op, {new_const_op});
   return success();
 }

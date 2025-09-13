@@ -36,7 +36,6 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-using ::tensorflow::testing::StatusIs;
 using ::testing::HasSubstr;
 using ::testing::Not;
 
@@ -49,7 +48,7 @@ TEST(FallbackStateTest, CreateWithCpuDeviceVector) {
       session_options, "/job:localhost/replica:0/task:0", &devices));
 
   std::variant<std::vector<std::unique_ptr<Device>>,
-               absl::Nonnull<DynamicDeviceMgr*>>
+               DynamicDeviceMgr* absl_nonnull>
       device_variant = std::move(devices);
 
   auto fallback_state = std::make_unique<tfrt_stub::FallbackState>(
@@ -70,7 +69,7 @@ TEST(FallbackStateTest, CreateWithDynamicDeviceMgr) {
   auto static_device_mgr =
       std::make_unique<DynamicDeviceMgr>(std::move(devices));
 
-  absl::Nonnull<DynamicDeviceMgr*> device_mgr_ptr(static_device_mgr.get());
+  DynamicDeviceMgr* absl_nonnull device_mgr_ptr(static_device_mgr.get());
 
   auto fallback_state = std::make_unique<tfrt_stub::FallbackState>(
       session_options, device_mgr_ptr, fdef_lib);
@@ -103,8 +102,8 @@ TEST(FallbackStateTest, CreateRendezvous) {
 
   auto status = pflr.RunSync(opts, pflr.GetHandle("dummy_fn"), {}, nullptr);
 
-  EXPECT_THAT(status, Not(StatusIs(error::FAILED_PRECONDITION,
-                                   HasSubstr("rendezvous"))));
+  EXPECT_THAT(status, Not(absl_testing::StatusIs(error::FAILED_PRECONDITION,
+                                                 HasSubstr("rendezvous"))));
 }
 
 TEST(FallbackStateTest, CreateGraphExecutionState) {

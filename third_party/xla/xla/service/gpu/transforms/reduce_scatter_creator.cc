@@ -34,7 +34,7 @@ limitations under the License.
 #include "xla/service/hlo_module_config.h"
 #include "xla/shape.h"
 #include "xla/status_macros.h"
-#include "tsl/platform/errors.h"
+#include "xla/tsl/platform/errors.h"
 
 namespace xla {
 namespace gpu {
@@ -82,9 +82,9 @@ absl::StatusOr<bool> ReduceScatterCreator::Run(
                                      scatter_dim_size * ar_spec->group_size);
         rs_input = computation->AddInstruction(HloInstruction::CreateSlice(
             scatter_shape, rs_input,
-            std::vector<int64_t>(scatter_shape.rank(), 0),
+            std::vector<int64_t>(scatter_shape.dimensions().size(), 0),
             scatter_shape.dimensions(),
-            std::vector<int64_t>(scatter_shape.rank(), 1)));
+            std::vector<int64_t>(scatter_shape.dimensions().size(), 1)));
       }
       scatter_shape.set_dimensions(split_dim, scatter_dim_size);
 

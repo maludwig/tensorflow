@@ -33,8 +33,8 @@ limitations under the License.
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/instruction_fusion.h"
 #include "xla/stream_executor/device_description.h"
+#include "xla/tsl/platform/threadpool.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/threadpool.h"
 
 namespace xla {
 namespace gpu {
@@ -60,7 +60,8 @@ class PriorityFusion : public HloModulePass {
   HloInstruction::FusionKind ChooseKind(const HloInstruction* producer,
                                         const HloInstruction* consumer);
 
-  HloInstruction* Fuse(HloInstruction* producer, HloInstruction* consumer);
+  HloInstruction* Fuse(HloInstruction* producer, HloInstruction* consumer,
+                       bool use_multi_output_fusion = false);
 
  private:
   // Consumes a unit of compiler fuel and returns true if we should

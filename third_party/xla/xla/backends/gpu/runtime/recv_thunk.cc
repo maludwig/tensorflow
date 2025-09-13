@@ -36,6 +36,7 @@ limitations under the License.
 #include "xla/status_macros.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/stream.h"
+#include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 
@@ -65,9 +66,9 @@ absl::Status RecvThunk::Initialize(const InitializeParams& params) {
   return absl::OkStatus();
 }
 
-absl::Status RecvThunk::RunCollective(const ExecuteParams& params,
-                                      se::Stream& stream,
-                                      CommunicatorHandle comm_handle) {
+absl::StatusOr<bool> RecvThunk::RunCollective(const ExecuteParams& params,
+                                              se::Stream& stream,
+                                              CommunicatorHandle comm_handle) {
   TF_ASSIGN_OR_RETURN(
       std::vector<DeviceBufferPair> device_buffers,
       ConvertToDeviceBuffers(params, {buffer_},
@@ -93,20 +94,17 @@ absl::Status RecvThunk::RunCollective(const ExecuteParams& params,
   // the peer that will copy its data to this instance. If there is no
   // source, just memzero() the destination buffer.
   int device_ordinal = stream.parent()->device_ordinal();
-  VLOG(3) << "Performing Recv from device ordinal: " << device_ordinal
-          << ", current_id: " << current_id << ", group mode: "
+  VLOG(3) << "[" << device_ordinal
+          << "] Performing Recv, current_id: " << current_id << ", group mode: "
           << CollectiveOpGroupModeToString(config_.config.group_mode) << " ("
           << hlo_name_ << ")";
-
-  TF_ASSIGN_OR_RETURN(GpuCollectives * collectives, GetGpuCollectives(params));
-  TF_RETURN_IF_ERROR(MaybeRegisterBuffers(collectives, stream.parent(),
-                                          {buffer}, comm_handle.comm));
 
   const std::optional<int64_t> source_id = source_target.source;
   se::DeviceMemoryBase dest_addr = buffer.destination_buffer;
 
-  VLOG(3) << absl::StreamFormat("%s : id = %d, source_id = %d", device_string,
-                                current_id, source_id.value_or(-1));
+  VLOG(3) << absl::StreamFormat("[%d] %s : id = %d, source_id = %d",
+                                device_ordinal, device_string, current_id,
+                                source_id.value_or(-1));
 
   // Receive data from the source peer to the destination buffer.
   if (source_id) {
@@ -126,24 +124,33 @@ absl::Status RecvThunk::RunCollective(const ExecuteParams& params,
       if (*counter < it->second.first || *counter > it->second.second) {
         should_run = false;
       }
-      VLOG(3) << "RunCollective counter " << *counter << " " << should_run;
+      VLOG(3) << "[" << device_ordinal << "] RunCollective counter " << *counter
+              << " " << should_run;
       ++(*counter);
     }
     if (should_run) {
-      TF_RETURN_IF_ERROR(comm_handle.comm->Recv(
+      TF_RETURN_IF_ERROR(
+          MaybeRegisterBuffers(stream.parent(), {buffer}, comm_handle.comm));
+      auto event = comm_handle.comm->Recv(
           dest_addr, buffer.element_type, buffer.element_count,
-          RankId(*source_id), GpuCollectives::On(stream)));
+          RankId(*source_id), GpuCollectives::On(stream));
+
+      tsl::BlockUntilReady(event);
+      if (event.IsError()) {
+        return event.GetError();
+      }
     } else {
-      VLOG(3) << "Skipping Recv";
+      VLOG(3) << "[" << device_ordinal << "] Skipping Recv";
     }
 
   } else {
     // If there is no source peer, i.e. no sender to this instance, zero out
     // the destination buffer.
-    VLOG(3) << absl::StreamFormat("%s : Recv: Issuing MemZero", device_string);
+    VLOG(3) << absl::StreamFormat("[%d] %s : Recv: Issuing MemZero",
+                                  device_ordinal, device_string);
     TF_RETURN_IF_ERROR(stream.MemZero(&dest_addr, dest_addr.size()));
   }
-  return absl::OkStatus();
+  return false;
 }
 
 }  // namespace gpu

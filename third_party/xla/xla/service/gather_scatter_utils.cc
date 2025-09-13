@@ -51,7 +51,7 @@ std::vector<HloInstruction*> GenerateExplicitBatchDimIndices(
     return {};
   }
 
-  int64_t rank = start_indices_shape.rank();
+  int64_t rank = start_indices_shape.dimensions().size();
   int64_t num_batch_dims = (rank == index_vector_dim) ? rank : rank - 1;
   HloComputation* computation = induction_var->parent();
   HloInstruction* divident = induction_var;
@@ -60,7 +60,7 @@ std::vector<HloInstruction*> GenerateExplicitBatchDimIndices(
   std::vector<HloInstruction*> explicit_batch_dim_indices(
       start_indices_batching_dims.size());
 
-  for (int64_t i = start_indices_shape.rank() - 1; i >= 0; i--) {
+  for (int64_t i = start_indices_shape.dimensions().size() - 1; i >= 0; i--) {
     if (i == index_vector_dim) {
       continue;
     }
@@ -75,9 +75,9 @@ std::vector<HloInstruction*> GenerateExplicitBatchDimIndices(
       break;
     }
 
-    HloInstruction* divisor =
-        computation->AddInstruction(HloInstruction::CreateConstant(
-            LiteralUtil::CreateR0<int32_t>(start_indices_shape.dimensions(i))));
+    HloInstruction* divisor = computation->AddInstruction(
+        HloInstruction::CreateConstant(LiteralUtil::CreateR0(
+            shape.element_type(), start_indices_shape.dimensions(i))));
     if (it != start_indices_batching_dims.end()) {
       explicit_batch_dim_indices[it - start_indices_batching_dims.begin()] =
           computation->AddInstruction(HloInstruction::CreateBinary(
@@ -95,7 +95,7 @@ std::vector<HloInstruction*> GenerateExplicitBatchDimIndices(
 
 absl::StatusOr<HloInstruction*> TransformStartIndices(
     HloInstruction* indices, int64_t index_vector_dim) {
-  int64_t rank = indices->shape().rank();
+  int64_t rank = indices->shape().dimensions().size();
   if (index_vector_dim == rank) {
     // Add a size 1 dimension to the indices if the index_vector_dim is
     // implicit.
@@ -195,6 +195,13 @@ absl::StatusOr<HloInstruction*> ExpandIndexVectorIntoOperandSpace(
       computation->AddInstruction(HloInstruction::CreateConstant(
           LiteralUtil::CreateFromDimensions(index_shape.element_type(), {1})));
 
+  if (induction_var->shape().element_type() != index_shape.element_type()) {
+    induction_var =
+        induction_var->parent()->AddInstruction(HloInstruction::CreateConvert(
+            ShapeUtil::ChangeElementType(induction_var->shape(),
+                                         index_shape.element_type()),
+            induction_var));
+  }
   // We extract out individual components from the smaller index and concatenate
   // them (interspersing zeros as needed) into the larger index.
   std::vector<HloInstruction*> expanded_index_components;

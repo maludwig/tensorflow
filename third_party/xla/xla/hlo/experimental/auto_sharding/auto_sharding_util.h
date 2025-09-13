@@ -63,6 +63,10 @@ inline bool IsSPMDShardToFullShapeCustomCall(const HloInstruction* ins) {
   return ins->IsCustomCall("SPMDShardToFullShape");
 }
 
+inline bool IsShardingCustomCall(const HloInstruction* ins) {
+  return ins->IsCustomCall("Sharding");
+}
+
 inline std::pair<int, int> ParseMeshDims(const std::string& strategy_name) {
   if (absl::StrContains(strategy_name, "{0,1}")) {
     return {0, 1};
@@ -72,12 +76,12 @@ inline std::pair<int, int> ParseMeshDims(const std::string& strategy_name) {
 
 inline std::string ToAdaptiveString(const HloInstruction* ins) {
   bool is_large_instruction =
-      ins->shape().IsTuple() && ins->shape().tuple_shapes_size() > 500;
+      ins->shape().IsTuple() && ins->shape().tuple_shapes().size() > 500;
   if (!is_large_instruction) {
     for (const auto& operand : ins->operands()) {
-      is_large_instruction =
-          is_large_instruction || (operand->shape().IsTuple() &&
-                                   operand->shape().tuple_shapes_size() > 500);
+      is_large_instruction = is_large_instruction ||
+                             (operand->shape().IsTuple() &&
+                              operand->shape().tuple_shapes().size() > 500);
     }
   }
   return is_large_instruction ? ins->ToShortString() : ins->ToString();
@@ -184,7 +188,7 @@ GetSpaceDims(const Shape& lhs_shape, const Shape& rhs_shape,
              const DotDimensionNumbers& dnums) {
   tsl::protobuf::RepeatedField<int64_t> lhs_space_dims, rhs_space_dims;
 
-  for (int64_t i = 0; i < lhs_shape.rank(); ++i) {
+  for (int64_t i = 0; i < lhs_shape.dimensions().size(); ++i) {
     if (absl::c_linear_search(dnums.lhs_batch_dimensions(), i) ||
         absl::c_linear_search(dnums.lhs_contracting_dimensions(), i)) {
       continue;
@@ -192,7 +196,7 @@ GetSpaceDims(const Shape& lhs_shape, const Shape& rhs_shape,
     lhs_space_dims.Add(i);
   }
 
-  for (int64_t i = 0; i < rhs_shape.rank(); ++i) {
+  for (int64_t i = 0; i < rhs_shape.dimensions().size(); ++i) {
     if (absl::c_linear_search(dnums.rhs_batch_dimensions(), i) ||
         absl::c_linear_search(dnums.rhs_contracting_dimensions(), i)) {
       continue;

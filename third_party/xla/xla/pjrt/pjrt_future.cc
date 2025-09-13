@@ -18,23 +18,37 @@ limitations under the License.
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <tuple>
 #include <utility>
 
+#include "absl/base/no_destructor.h"
+#include "absl/base/optimization.h"
 #include "absl/base/thread_annotations.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "xla/tsl/concurrency/async_value_ref.h"
 
 namespace xla {
 
+// Construct an immediately ready promise in the static storage. This avoids
+// heap allocation and reference counting operations on a hot path.
+static tsl::internal::AsyncValueStorage<absl::Status> ready_promise_storage;
+absl::NoDestructor<tsl::AsyncValueOwningRef<absl::Status>>
+    PjRtFuture<>::ready_promise_(
+        tsl::MakeAvailableAsyncValueRef<absl::Status>(ready_promise_storage));
+
 namespace {
 struct State {
-  explicit State(int32_t size)
-      : pending_count(size), promise(PjRtFuture<>::CreatePromise()) {}
+  explicit State(int32_t size) : pending_count(size) {
+    std::tie(promise, future) = PjRtFuture<>::MakePromise();
+  }
 
   std::atomic<int32_t> pending_count;
   PjRtFuture<>::Promise promise;
+  PjRtFuture<> future;
 
   absl::Mutex mu;
   absl::Status status ABSL_GUARDED_BY(&mu);
@@ -45,7 +59,8 @@ PjRtFuture<> JoinFutures(absl::Span<const PjRtFuture<>> futures) {
   VLOG(2) << "xla::JoinFutures: " << futures.size() << " futures";
   if (futures.empty()) {
     return PjRtFuture<>(absl::OkStatus());
-  } else if (futures.size() == 1) {
+  }
+  if (futures.size() == 1) {
     return futures.front();
   }
 
@@ -53,7 +68,7 @@ PjRtFuture<> JoinFutures(absl::Span<const PjRtFuture<>> futures) {
 
   for (const PjRtFuture<>& future : futures) {
     future.OnReady([state](absl::Status status) {
-      if (!status.ok()) {
+      if (ABSL_PREDICT_FALSE(!status.ok())) {
         absl::MutexLock lock(&state->mu);
         if (VLOG_IS_ON(2)) {
           if (!state->status.ok() && status.code() != state->status.code()) {
@@ -64,7 +79,7 @@ PjRtFuture<> JoinFutures(absl::Span<const PjRtFuture<>> futures) {
         state->status.Update(status);
       }
 
-      const int pending_count =
+      int32_t pending_count =
           state->pending_count.fetch_sub(1, std::memory_order_acq_rel);
       CHECK_GE(pending_count, 1) << "Pending count can't drop below 0";
 
@@ -75,7 +90,7 @@ PjRtFuture<> JoinFutures(absl::Span<const PjRtFuture<>> futures) {
     });
   }
 
-  return PjRtFuture<>(state->promise);
+  return std::move(state->future);
 }
 
 }  // namespace xla

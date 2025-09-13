@@ -58,16 +58,18 @@ HloDotInstruction* MakeDotWithSwappedOperands(HloInstruction* dot) {
   const DotDimensionNumbers& dot_dims = dot->dot_dimension_numbers();
   const size_t num_batch_dims = dot_dims.lhs_batch_dimensions_size();
   const size_t num_lhs_noncontracting_dims =
-      dot->operand(0)->shape().rank() - num_batch_dims -
+      dot->operand(0)->shape().dimensions().size() - num_batch_dims -
       dot_dims.lhs_contracting_dimensions_size();
   const size_t num_rhs_noncontracting_dims =
-      dot->operand(1)->shape().rank() - num_batch_dims -
+      dot->operand(1)->shape().dimensions().size() - num_batch_dims -
       dot_dims.rhs_contracting_dimensions_size();
 
   std::vector<int64_t> out_shape_permutation;
-  out_shape_permutation.reserve(dot->shape().rank());
+  out_shape_permutation.reserve(dot->shape().dimensions().size());
   auto fill_permutation = [&](int64_t count, int64_t start) {
-    while (count--) out_shape_permutation.push_back(start++);
+    while (count--) {
+      out_shape_permutation.push_back(start++);
+    }
   };
   // The output shape of a dot is batch dimensions, then lhs non-contracting,
   // then rhs non-contracting. Batch dimensions stay where they were. and
@@ -139,7 +141,7 @@ absl::StatusOr<int64_t> GetNonContractingDimsNumElements(
       operand_index == 0 ? dot_dims.lhs_contracting_dimensions()
                          : dot_dims.rhs_contracting_dimensions();
   const DimensionVector noncontracting_dim_indices = GetNonContractingDims(
-      shape.rank(), batch_dim_indices, contracting_dim_indices);
+      shape.dimensions().size(), batch_dim_indices, contracting_dim_indices);
   return absl::c_accumulate(
       noncontracting_dim_indices, int64_t{1},
       [&](int64_t acc, int64_t dim) { return acc * shape.dimensions(dim); });
@@ -155,17 +157,21 @@ absl::StatusOr<int64_t> GetNonContractingDimsNumElements(
 // powers of two.
 absl::StatusOr<bool> ShouldSwapOperands(const HloInstruction* instr) {
   const HloDotInstruction* dot = DynCast<HloDotInstruction>(instr);
-  if (dot == nullptr) return false;
-  // Sparsity is generally not symmetric, so we cannot swap operands.
-  if (dot->sparse_operands()) return false;
+  if (dot == nullptr) {
+    return false;
+  }
   const bool lhs_has_code = HasCodeGeneratingInstructions(dot->operand(0));
   const bool rhs_has_code = HasCodeGeneratingInstructions(dot->operand(1));
   TF_ASSIGN_OR_RETURN(const int64_t lhs_size, GetNonContractingDimsNumElements(
                                                   dot, /*operand_index=*/0));
   TF_ASSIGN_OR_RETURN(const int64_t rhs_size, GetNonContractingDimsNumElements(
                                                   dot, /*operand_index=*/1));
-  if (lhs_size < 64 && rhs_size >= 64) return true;
-  if (!lhs_has_code && rhs_has_code && rhs_size >= 64) return true;
+  if (lhs_size < 64 && rhs_size >= 64) {
+    return true;
+  }
+  if (!lhs_has_code && rhs_has_code && rhs_size >= 64) {
+    return true;
+  }
   return false;
 }
 
@@ -185,12 +191,18 @@ absl::StatusOr<bool> EmitterCanHandleSwappedOperands(
 absl::StatusOr<bool> MaybeSwapOperands(HloComputation* computation) {
   HloInstruction* dot =
       hlo_query::GetFirstInstructionWithOpcode(*computation, HloOpcode::kDot);
-  if (dot == nullptr) return false;
+  if (dot == nullptr) {
+    return false;
+  }
   TF_ASSIGN_OR_RETURN(const bool should_swap_operands, ShouldSwapOperands(dot));
-  if (!should_swap_operands) return false;
+  if (!should_swap_operands) {
+    return false;
+  }
   TF_ASSIGN_OR_RETURN(const bool can_handle_swapped_operands,
                       EmitterCanHandleSwappedOperands(dot));
-  if (!can_handle_swapped_operands) return false;
+  if (!can_handle_swapped_operands) {
+    return false;
+  }
   TF_RETURN_IF_ERROR(SwapDotOperandsInFusion(computation));
   return true;
 }
@@ -203,7 +215,9 @@ absl::StatusOr<bool> GemmFusionSwapOperands::Run(
   bool any_changed = false;
   for (HloComputation* computation :
        module->MakeComputationPostOrder(execution_threads)) {
-    if (!IsTritonFusedComputation(*computation)) continue;
+    if (!IsTritonFusedComputation(*computation)) {
+      continue;
+    }
     TF_ASSIGN_OR_RETURN(const bool changed, MaybeSwapOperands(computation));
     any_changed |= changed;
   }

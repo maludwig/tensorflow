@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <unordered_map>
 
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
 #include "tensorflow/core/distributed_runtime/master.h"
 #include "tensorflow/core/platform/mutex.h"
 
@@ -25,14 +27,14 @@ namespace tensorflow {
 namespace {
 absl::Status WaitForNotification(CallOptions* call_options,
                                  const int64_t default_timeout_in_ms,
-                                 Notification* n) {
+                                 absl::Notification* n) {
   int64_t timeout_in_ms = call_options->GetTimeout();
   if (timeout_in_ms == 0) {
     timeout_in_ms = default_timeout_in_ms;
   }
   if (timeout_in_ms > 0) {
-    int64_t timeout_in_us = timeout_in_ms * 1000;
-    bool notified = WaitForNotificationWithTimeout(n, timeout_in_us);
+    bool notified =
+        n->WaitForNotificationWithTimeout(absl::Milliseconds(timeout_in_ms));
     if (!notified) {
       call_options->StartCancel();
       // The call has borrowed pointers to the request and response
@@ -55,7 +57,7 @@ LocalMaster::LocalMaster(Master* master_impl,
 absl::Status LocalMaster::CreateSession(CallOptions* call_options,
                                         const CreateSessionRequest* request,
                                         CreateSessionResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->CreateSession(request, response,
                               [&n, &ret](const absl::Status& s) {
@@ -70,7 +72,7 @@ absl::Status LocalMaster::CreateSession(CallOptions* call_options,
 absl::Status LocalMaster::ExtendSession(CallOptions* call_options,
                                         const ExtendSessionRequest* request,
                                         ExtendSessionResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->ExtendSession(request, response,
                               [&n, &ret](const absl::Status& s) {
@@ -85,7 +87,7 @@ absl::Status LocalMaster::ExtendSession(CallOptions* call_options,
 absl::Status LocalMaster::PartialRunSetup(CallOptions* call_options,
                                           const PartialRunSetupRequest* request,
                                           PartialRunSetupResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->PartialRunSetup(request, response,
                                 [&n, &ret](const absl::Status& s) {
@@ -100,7 +102,7 @@ absl::Status LocalMaster::PartialRunSetup(CallOptions* call_options,
 absl::Status LocalMaster::RunStep(CallOptions* call_options,
                                   RunStepRequestWrapper* request,
                                   MutableRunStepResponseWrapper* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->RunStep(call_options, request, response,
                         [&n, &ret](const absl::Status& s) {
@@ -123,7 +125,7 @@ MutableRunStepResponseWrapper* LocalMaster::CreateRunStepResponse() {
 absl::Status LocalMaster::CloseSession(CallOptions* call_options,
                                        const CloseSessionRequest* request,
                                        CloseSessionResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->CloseSession(request, response,
                              [&n, &ret](const absl::Status& s) {
@@ -138,7 +140,7 @@ absl::Status LocalMaster::CloseSession(CallOptions* call_options,
 absl::Status LocalMaster::ListDevices(CallOptions* call_options,
                                       const ListDevicesRequest* request,
                                       ListDevicesResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->ListDevices(request, response,
                             [&n, &ret](const absl::Status& s) {
@@ -153,7 +155,7 @@ absl::Status LocalMaster::ListDevices(CallOptions* call_options,
 absl::Status LocalMaster::Reset(CallOptions* call_options,
                                 const ResetRequest* request,
                                 ResetResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->Reset(request, response, [&n, &ret](const absl::Status& s) {
     ret.Update(s);
@@ -167,7 +169,7 @@ absl::Status LocalMaster::Reset(CallOptions* call_options,
 absl::Status LocalMaster::MakeCallable(CallOptions* call_options,
                                        const MakeCallableRequest* request,
                                        MakeCallableResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->MakeCallable(request, response,
                              [&n, &ret](const absl::Status& s) {
@@ -181,7 +183,7 @@ absl::Status LocalMaster::MakeCallable(CallOptions* call_options,
 absl::Status LocalMaster::RunCallable(CallOptions* call_options,
                                       const RunCallableRequest* request,
                                       RunCallableResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->RunCallable(call_options, request, response,
                             [&n, &ret](const absl::Status& s) {
@@ -195,7 +197,7 @@ absl::Status LocalMaster::RunCallable(CallOptions* call_options,
 absl::Status LocalMaster::ReleaseCallable(CallOptions* call_options,
                                           const ReleaseCallableRequest* request,
                                           ReleaseCallableResponse* response) {
-  Notification n;
+  absl::Notification n;
   absl::Status ret;
   master_impl_->ReleaseCallable(request, response,
                                 [&n, &ret](const absl::Status& s) {

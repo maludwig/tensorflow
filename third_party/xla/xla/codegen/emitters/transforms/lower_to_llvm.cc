@@ -30,6 +30,7 @@ limitations under the License.
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
+#include "mlir/Dialect/AMDGPU/Utils/Chipset.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
@@ -47,6 +48,7 @@ limitations under the License.
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_description.pb.h"
 #include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/status.h"
 #include "tsl/platform/protobuf.h"  // IWYU pragma: keep
 
 namespace xla {
@@ -71,7 +73,10 @@ class LowerToLLVMPass : public impl::LowerToLLVMPassBase<LowerToLLVMPass> {
       se::GpuDeviceInfoProto device_info;
       CHECK(tsl::protobuf::TextFormat::ParseFromString(gpu_device_info_,
                                                        &device_info));
-      *device_spec_.mutable_type() = se::DeviceDescription(device_info);
+      absl::StatusOr<se::DeviceDescription> device_description =
+          se::DeviceDescription::FromProto(device_info);
+      TF_CHECK_OK(device_description.status());
+      *device_spec_.mutable_type() = *device_description;
     } else if (target_type_ == "cpu") {
       CHECK(gpu_device_info_.empty());
       *device_spec_.mutable_type() = CpuDeviceSpec{};
@@ -90,8 +95,18 @@ class LowerToLLVMPass : public impl::LowerToLLVMPassBase<LowerToLLVMPass> {
                                                        patterns);
     if (device_spec_.IsGpu()) {
       if (device_spec_.IsAmdGpu()) {
+        std::string chipset =
+            device_spec_.gpu().rocm_compute_capability().gfx_version();
+        llvm::FailureOr<mlir::amdgpu::Chipset> maybeChipset =
+            mlir::amdgpu::Chipset::parse(chipset);
+        if (failed(maybeChipset)) {
+          mlir::emitError(mlir::UnknownLoc::get(&getContext()),
+                          "Invalid chipset name: " + chipset);
+          return signalPassFailure();
+        }
         mlir::populateGpuToROCDLConversionPatterns(
-            type_converter, patterns, mlir::gpu::amd::Runtime::Unknown);
+            type_converter, patterns, mlir::gpu::amd::Runtime::Unknown,
+            *maybeChipset);
         mlir::configureGpuToROCDLConversionLegality(target);
       } else {
         mlir::populateGpuToNVVMConversionPatterns(type_converter, patterns);

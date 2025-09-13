@@ -1,4 +1,6 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load("//tensorflow/lite:build_def.bzl", "tflite_copts", "tflite_copts_warnings", "tflite_self_contained_libs_test_suite")
 load("//tensorflow/lite:special_rules.bzl", "internal_visibility_allowlist", "tflite_portable_test_suite")
@@ -148,6 +150,19 @@ cc_library(
     alwayslink = 1,  # TODO(b/161243354): eliminate this.
 )
 
+# This is a private target, its visibility is set to public only to be
+# used by LiteRT dependencies.
+# Do not use this target directly and don't consider it as a part of the public API.
+# TODO(weiyiw): Refactor LiteRT deps from TFLite.
+alias(
+    name = "private_cc_api_stable",
+    actual = ":cc_api_stable",
+    tags = ["avoid_dep"],
+    visibility = [
+        "//visibility:public",
+    ],
+)
+
 # TODO(b/242310498): move logger.cc from tensorflow/lite/ to here.
 cc_library(
     name = "cc_api_stable",
@@ -165,8 +180,10 @@ cc_library(
     ],
     compatible_with = get_compatible_with_portable(),
     visibility = [
+        "//third_party/deepmind/lyria_live/internal/odml:__subpackages__",
+        # copybara:uncomment "//third_party/odml/litert/litert:__subpackages__",
+        # "//third_party/odml/litert:__subpackages__",  # copybara:uncomment
         "//tensorflow/lite:__subpackages__",
-        "//third_party/odml/litert/litert:__subpackages__",
     ] + core_cc_api_stable_visibility_allowlist(),
     deps = [
         ":model_builder",
@@ -517,9 +534,14 @@ cc_library(
     name = "model_building",
     srcs = ["model_building.cc"],
     hdrs = ["model_building.h"],
+    visibility = [
+        "//tensorflow/lite:__subpackages__",
+    ],
     deps = [
         ":subgraph",
+        "//tensorflow/lite:array",
         "//tensorflow/lite:framework",
+        "//tensorflow/lite:type_to_tflitetype",
         "//tensorflow/lite/c:c_api_types",
         "//tensorflow/lite/c:common",
         "//tensorflow/lite/core/c:common",

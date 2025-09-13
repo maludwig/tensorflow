@@ -77,7 +77,7 @@ tf_cuda_library(
             "//tensorflow/core:protos_all_cc",
             "@com_google_absl//absl/container:flat_hash_map",
         ],
-    }),
+    }) + ["@com_google_absl//absl/synchronization"],
 )
 
 tf_cc_test(
@@ -125,6 +125,7 @@ tf_cuda_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
         "@local_xla//xla/tsl/util:env_var",
     ] + select({
         "//tensorflow:android": [
@@ -253,7 +254,6 @@ tf_cuda_library(
             "@local_xla//xla/pjrt/gpu:se_gpu_pjrt_client",
             "@local_xla//xla/tsl/distributed_runtime/coordination:coordination_service",
             "@local_xla//xla/tsl/distributed_runtime/coordination:coordination_service_agent",
-            "@local_xla//xla/tsl/distributed_runtime/coordination:coordination_service_impl",
             "@local_xla//xla/tsl/distributed_runtime/preemption:preemption_notifier",
             "@local_xla//xla/tsl/platform:statusor",
         ],
@@ -267,7 +267,6 @@ tf_cuda_library(
             clean_dep("//tensorflow:linux_x86_64_with_weightwatcher"): [],
             (
                 clean_dep("//tensorflow:linux_x86_64"),
-                clean_dep("//tensorflow:haswell"),
             ): [
                 "//tensorflow/core",
                 "//tensorflow/core/framework:resource_base",
@@ -434,6 +433,7 @@ tf_cuda_library(
         ":eager_executor",
         ":kernel_and_device",
         ":tensor_handle_data",
+        "@com_google_absl//absl/synchronization",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",
@@ -580,6 +580,7 @@ tf_cuda_library(
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:optional",
         "@farmhash_archive//:farmhash",
     ] + select({

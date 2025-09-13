@@ -218,6 +218,22 @@ def MHLO_AbsOp: MHLO_UnaryElementwiseOp<"abs",
   let hasFolder = 1;
 }
 
+def MHLO_AcoshOp : MHLO_UnaryElementwiseOp<"acosh",
+    [HLO_CompatibleOperandsAndResultType], HLO_AnyFpOrComplexTensor> {
+  let summary = "Acosh operation";
+
+  let description = [{
+     Performs element-wise acosh operation on `operand` tensor and produces a
+    `result` tensor.
+
+    Example:
+    ```mlir
+    %result = mhlo.acosh %operand : tensor<2x2xf32>
+    ```
+  }];
+  let hasFolder = 1;
+}
+
 def MHLO_CbrtOp: MHLO_UnaryElementwiseOp<"cbrt",
     [Pure, HLO_CompatibleOperandsAndResultType], MHLO_FpComplexOrQuantizedIntTensor> {
   let summary = "Cbrt operation";
@@ -233,6 +249,11 @@ def MHLO_CbrtOp: MHLO_UnaryElementwiseOp<"cbrt",
     %result = mhlo.cbrt %operand : tensor<4xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
 }
 def MHLO_CeilOp: MHLO_UnaryElementwiseOp<"ceil",
     [Pure, HLO_CompatibleOperandsAndResultType], MHLO_FpOrQuantizedIntTensor> {
@@ -306,7 +327,11 @@ def MHLO_CosineOp: MHLO_UnaryElementwiseOp<"cosine",
     %result = mhlo.cosine %operand : tensor<2xf32>
     ```
   }];
-
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
   let hasCustomHLOConverter = 1;
 }
@@ -317,9 +342,6 @@ def MHLO_ErfOp: MHLO_UnaryElementwiseOp<"erf",
   let description = [{
     Performs element-wise erf operation on `operand` tensor and produces a
     `result` tensor.
-
-    See:
-    https://github.com/openxla/stablehlo/blob/main/docs/spec.md#erf
 
     Example:
     ```mlir
@@ -344,7 +366,8 @@ def MHLO_ExpOp: MHLO_UnaryElementwiseOp<"exponential",
     ```
   }];
   let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
-   DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr, "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
   let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
   let hasVerifier = 1;
   let hasFolder = 1;
@@ -364,6 +387,11 @@ def MHLO_Expm1Op: MHLO_UnaryElementwiseOp<"exponential_minus_one",
     %result = mhlo.exponential_minus_one %operand : tensor<2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
 }
 def MHLO_FloorOp: MHLO_UnaryElementwiseOp<"floor",
     [Pure, HLO_CompatibleOperandsAndResultType], MHLO_FpOrQuantizedIntTensor> {
@@ -440,6 +468,11 @@ def MHLO_LogOp: MHLO_UnaryElementwiseOp<"log",
     %result = mhlo.log %operand : tensor<2x2xf64>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
 }
 def MHLO_Log1pOp: MHLO_UnaryElementwiseOp<"log_plus_one",
@@ -457,6 +490,11 @@ def MHLO_Log1pOp: MHLO_UnaryElementwiseOp<"log_plus_one",
     %result = mhlo.log_plus_one %operand : tensor<6xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
 }
 def MHLO_LogisticOp: MHLO_UnaryElementwiseOp<"logistic",
     [Pure, HLO_CompatibleOperandsAndResultType], MHLO_FpComplexOrQuantizedIntTensor> {
@@ -473,6 +511,11 @@ def MHLO_LogisticOp: MHLO_UnaryElementwiseOp<"logistic",
     %result = mhlo.logistic %operand : tensor<2x2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
 }
 def MHLO_NotOp: MHLO_UnaryElementwiseOp<"not",
@@ -599,6 +642,11 @@ def MHLO_RsqrtOp: MHLO_UnaryElementwiseOp<"rsqrt",
     %result = mhlo.rsqrt %operand : tensor<2x2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
 }
 
@@ -636,6 +684,11 @@ def MHLO_SineOp: MHLO_UnaryElementwiseOp<"sine",
     %result = mhlo.sine %operand : tensor<2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
   let hasCustomHLOConverter = 1;
 }
@@ -654,6 +707,11 @@ def MHLO_TanOp: MHLO_UnaryElementwiseOp<"tan",
     %0 = mhlo.tan %arg0 : tensor<2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
   let hasCustomHLOConverter = 1;
 }
@@ -673,6 +731,11 @@ def MHLO_SqrtOp: MHLO_UnaryElementwiseOp<"sqrt",
     %result = mhlo.sqrt %operand : tensor<2x2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
 }
 
@@ -692,6 +755,11 @@ def MHLO_TanhOp: MHLO_UnaryElementwiseOp<"tanh",
     %result = mhlo.tanh %operand : tensor<2xf32>
     ```
   }];
+  let arguments = (ins MHLO_FpComplexOrQuantizedIntTensor:$operand,
+                       DefaultValuedOptionalAttr<MHLO_ResultAccuracyAttr,
+                       "::mlir::mhlo::ResultAccuracyMode::DEFAULT">:$result_accuracy);
+  let results = (outs MHLO_FpComplexOrQuantizedIntTensor:$result);
+  let hasVerifier = 1;
   let hasFolder = 1;
 }
 //===----------------------------------------------------------------------===//
@@ -1123,9 +1191,10 @@ def MHLO_SendOp : MHLO_Op<"send",
     ```mlir
     %result = "mhlo.send"(%operand, %token) {
       // channel_id = 5 : i64,
-      // channel_type = #stablehlo<channel_type DEVICE_TO_HOST>,
-      channel_handle = #mhlo.channel_handle<handle = 5, type = 2>,
-      is_host_transfer = true
+      // channel_type = #stablehlo<channel_type DEVICE_TO_DEVICE>,
+      channel_handle = #mhlo.channel_handle<handle = 5, type = 1>,
+      is_host_transfer = false,
+      source_target_pairs = dense<[[0, 1], [1, 2]]> : tensor<2x2xi64>
     } : (tensor<3x4xi32>, !mhlo.token) -> !mhlo.token
     ```
   }];
@@ -1134,7 +1203,8 @@ def MHLO_SendOp : MHLO_Op<"send",
     Variadic<MHLO_Tensor>:$inputs,
     MHLO_Token:$token,
     MHLO_ChannelHandle:$channel_handle,
-    DefaultValuedOptionalAttr<BoolAttr, "false">:$is_host_transfer
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$is_host_transfer,
+    OptionalAttr<I64ElementsAttr>:$source_target_pairs
   );
 
   let results = (outs MHLO_Token);
@@ -1153,9 +1223,10 @@ def MHLO_RecvOp : MHLO_Op<"recv", []> {
     ```mlir
     %results:2 = "mhlo.recv"(%token) {
       // channel_id = 5 : i64,
-      // channel_type = #stablehlo<channel_type HOST_TO_DEVICE>,
-      channel_handle = #mhlo.channel_handle<handle = 5, type = 3>,
-      is_host_transfer = true
+      // channel_type = #stablehlo<channel_type DEVICE_TO_DEVICE>,
+      channel_handle = #mhlo.channel_handle<handle = 5, type = 1>,
+      is_host_transfer = false,
+      source_target_pairs = dense<[[0, 1], [1, 2]]> : tensor<2x2xi64>
     } : (!mhlo.token) -> (tensor<3x4xi32>, !mhlo.token)
     ```
   }];
@@ -1163,7 +1234,8 @@ def MHLO_RecvOp : MHLO_Op<"recv", []> {
   let arguments = (ins
     MHLO_Token:$token,
     MHLO_ChannelHandle:$channel_handle,
-    DefaultValuedOptionalAttr<BoolAttr, "false">:$is_host_transfer
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$is_host_transfer,
+    OptionalAttr<I64ElementsAttr>:$source_target_pairs
   );
 
   let results = (outs Variadic<MHLO_StaticShapeTensorOrToken>);
@@ -1216,8 +1288,8 @@ def MHLO_AddDependencyOp : MHLO_Op<"add_dependency", [Pure,
     ```
   }];
 
-  let arguments = (ins MHLO_TensorOrToken:$operand, MHLO_Token:$token);
-  let results = (outs MHLO_TensorOrToken:$output);
+  let arguments = (ins MHLO_TensorOrAnyToken:$operand, MHLO_AnyToken:$token);
+  let results = (outs MHLO_TensorOrAnyToken:$output);
   let hasCustomHLOConverter = 1;
 
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
@@ -1435,11 +1507,11 @@ def MHLO_WhileOp: MHLO_Op<"while", [
     }) : (tensor<i32>, tensor<i32>) -> (tensor<i32>, tensor<i32>)
     ```
   }];
-  let arguments = (ins Variadic<MHLO_TensorOrToken>:$operand);
+  let arguments = (ins Variadic<MHLO_TensorOrTokenOrBuffer>:$operand);
 
   let regions = (region SizedRegion<1>:$cond, SizedRegion<1>:$body);
 
-  let results = (outs Variadic<MHLO_TensorOrToken>);
+  let results = (outs Variadic<MHLO_TensorOrTokenOrBuffer>);
 
   let extraClassDeclaration = [{
     // Method of OpAsmOpInterface used during custom printing to name the block
@@ -1741,7 +1813,7 @@ def MHLO_GetTupleElementOp: MHLO_Op<"get_tuple_element", [Pure,
     ConfinedAttr<I32Attr, [IntNonNegative]>:$index
   );
 
-  let results = (outs MHLO_TensorOrTokenOrTuple);
+  let results = (outs MHLO_TensorOrTokenOrTupleOrBuffer);
 
   let hasFolder = 1;
 
@@ -1764,7 +1836,7 @@ def MHLO_TupleOp : MHLO_Op<"tuple", [Pure,
     %result = mhlo.tuple %val0, %val1 : tuple<tensor<2xf32>, tuple<tensor<i32>>>
     ```
    }];
-  let arguments = (ins Variadic<MHLO_TensorOrTokenOrTuple>:$val);
+  let arguments = (ins Variadic<MHLO_TensorOrTokenOrTupleOrBuffer>:$val);
   let results = (outs MHLO_Tuple:$result);
 
   let hasCanonicalizer = 1;
@@ -2470,7 +2542,6 @@ def MHLO_CopyOp: MHLO_Op<"copy",
   );
   let results = (outs MHLO_TensorOrTokenOrTuple:$result);
   let hasCustomHLOConverter = 1;
-  let hasFolder = 1;
 
   let assemblyFormat = [{
     operands attr-dict
@@ -2690,29 +2761,6 @@ def MHLO_RaggedDotOp: MHLO_Op<"ragged_dot", [Pure]> {
   );
 
   let results = (outs HLO_Tensor:$result);
-  let hasCustomHLOConverter = 1;
-  let hasVerifier = 1;
-}
-
-def MHLO_SparseDotOp: MHLO_Op<"sparse_dot", [Pure]> {
-  let summary = "Sparse dot operation";
-  let description = [{
-    Similar to `dot_general` operation, with one or both of the operands being
-    sparse. An additional argument provides sparsity meta information.
-    Disclaimer: this op is experimental / a work in progress.
-  }];
-  let arguments = (ins
-    MHLO_Tensor:$lhs,
-    MHLO_Tensor:$rhs,
-    Variadic<MHLO_Tensor>:$meta,
-    OptionalAttr<MHLO_SparsityDescriptor>:$lhs_sparsity,
-    OptionalAttr<MHLO_SparsityDescriptor>:$rhs_sparsity,
-    MHLO_DotDimensionNumbers:$dot_dimension_numbers,
-    OptionalAttr<MHLO_PrecisionConfigAttr>:$precision_config
-  );
-  let results = (outs MHLO_Tensor);
-  // SparseDot op required custom exporter to pass the preferred element type
-  // to Xla builder.
   let hasCustomHLOConverter = 1;
   let hasVerifier = 1;
 }
@@ -3432,7 +3480,7 @@ def MHLO_ReturnOp : MHLO_Op<"return", [Pure, Terminator]> {
   }];
 
   let arguments = (ins
-    Variadic<MHLO_TensorOrTokenOrTuple >:$results
+    Variadic<MHLO_TensorOrTokenOrTupleOrBuffer >:$results
   );
 
   // Disable conversion operator for return op as the op is not an actual XLA

@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "tsl/platform/path.h"
 #include "tsl/platform/platform.h"
 
@@ -41,20 +42,26 @@ std::vector<std::string> CandidateCudaRoots() {
 #if !defined(PLATFORM_GOOGLE)
   auto roots = std::vector<std::string>{};
   std::string runfiles_suffix = "runfiles";
+  std::vector<std::string> cuda_dir_names = {"cuda_nvcc", "cuda_nvdisasm",
+                                             "nvidia_nvshmem", "cuda_nvvm"};
 
   // The CUDA candidate root for c++ targets.
   std::string executable_path = tsl::Env::Default()->GetExecutablePath();
-  std::string cuda_nvcc_dir =
-      io::JoinPath(executable_path + "." + runfiles_suffix, "cuda_nvcc");
-  roots.push_back(cuda_nvcc_dir);
+  for (const std::string& cuda_dir_name : cuda_dir_names) {
+    std::string cuda_dir =
+        io::JoinPath(executable_path + "." + runfiles_suffix, cuda_dir_name);
+    roots.push_back(cuda_dir);
+  }
 
   // The CUDA candidate root for python targets.
   std::string runfiles_dir = tsl::Env::Default()->GetRunfilesDir();
   std::size_t runfiles_ind = runfiles_dir.rfind(runfiles_suffix);
-  cuda_nvcc_dir = io::JoinPath(
-      runfiles_dir.substr(0, runfiles_ind + runfiles_suffix.length()),
-      "cuda_nvcc");
-  roots.push_back(cuda_nvcc_dir);
+  for (const std::string& cuda_dir_name : cuda_dir_names) {
+    std::string cuda_dir = io::JoinPath(
+        runfiles_dir.substr(0, runfiles_ind + runfiles_suffix.length()),
+        cuda_dir_name);
+    roots.push_back(cuda_dir);
+  }
 
   roots.push_back(TF_CUDA_TOOLKIT_PATH);
   roots.emplace_back(std::string("/usr/local/cuda"));
@@ -70,8 +77,17 @@ std::vector<std::string> CandidateCudaRoots() {
     // TF lib binaries are located in both the package's root dir and within a
     // 'python' subdirectory (for pywrap libs). So we check two possible paths
     // relative to the current binary for the wheel-based nvcc package.
-    for (auto path : {"../nvidia/cuda_nvcc", "../../nvidia/cuda_nvcc"})
+
+    // Runtime check on the version string content
+    std::vector<const char*> paths_to_add =
+        absl::StartsWith(TF_CUDA_VERSION, "13")
+            ? std::vector<const char*>{"../nvidia/cu13", "../../nvidia/cu13"}
+            : std::vector<const char*>{"../nvidia/cuda_nvcc",
+                                       "../../nvidia/cuda_nvcc"};
+
+    for (const char* path : paths_to_add) {
       roots.emplace_back(io::JoinPath(dir, path));
+    }
 
     // Also add the path to the copy of libdevice.10.bc that we include within
     // the Python wheel.

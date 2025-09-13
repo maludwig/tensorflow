@@ -33,7 +33,9 @@ limitations under the License.
 
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
+#include "xla/tsl/platform/criticality.h"
 #include "tensorflow/core/kernels/batching_util/batch_input_task.h"
 #include "tensorflow/core/kernels/batching_util/batch_scheduler.h"
 #include "tensorflow/core/kernels/batching_util/batch_scheduler_utils.h"
@@ -51,7 +53,6 @@ limitations under the License.
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/profiler/lib/traceme_encode.h"
-#include "tsl/platform/criticality.h"
 #include "tsl/platform/errors.h"
 #include "tsl/profiler/lib/connected_traceme.h"
 #include "tsl/profiler/lib/context_types.h"
@@ -595,7 +596,7 @@ class Queue {
   // starts. When ProcessBatch() dequeues the last batch and makes the queue
   // empty, if 'empty_notification_' is non-null it calls
   // 'empty_notification_->Notify()'.
-  Notification* empty_notification_ TF_GUARDED_BY(mu_) = nullptr;
+  absl::Notification* empty_notification_ TF_GUARDED_BY(mu_) = nullptr;
 
   Queue(const Queue&) = delete;
   void operator=(const Queue&) = delete;
@@ -1341,7 +1342,7 @@ bool Queue<TaskType>::IsEmpty() const {
 
 template <typename TaskType>
 void Queue<TaskType>::CloseAndWaitUntilEmpty() {
-  Notification empty;
+  absl::Notification empty;
   {
     mutex_lock l(mu_);
     closed_ = true;

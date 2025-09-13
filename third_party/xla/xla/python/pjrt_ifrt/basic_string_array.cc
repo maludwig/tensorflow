@@ -19,10 +19,10 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
-#include "absl/hash/hash.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -38,6 +38,7 @@ limitations under the License.
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
+#include "xla/python/ifrt/user_context.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
@@ -61,17 +62,14 @@ namespace ifrt {
 char BasicStringArray::ID = 0;
 
 absl::StatusOr<tsl::RCReference<BasicStringArray>> BasicStringArray::Create(
-    Client* client, Shape shape, std::shared_ptr<const Sharding> sharding,
-    Future<Buffers> buffers, OnDoneWithBuffer on_done_with_buffer) {
+    Client* client, Shape shape, ShardingRef sharding, Future<Buffers> buffers,
+    OnDoneWithBuffer on_done_with_buffer) {
   if (!buffers.IsValid()) {
     return absl::InvalidArgumentError("Got buffers_ future is invalid");
   }
 
-  auto buffers_promise = Future<Buffers>::CreatePromise();
-  auto buffers_future = Future<Buffers>(buffers_promise);
-
-  auto ready_promise = Future<>::CreatePromise();
-  auto ready_future = Future<>(ready_promise);
+  auto [buffers_promise, buffers_future] = Future<Buffers>::MakePromise();
+  auto [ready_promise, ready_future] = Future<>::MakePromise();
 
   // Buffers when the become ready must be consistent with the sharding. For
   // instance, Buffers.size() (the number of per-shard spans of absl::Cords)
@@ -89,11 +87,13 @@ absl::StatusOr<tsl::RCReference<BasicStringArray>> BasicStringArray::Create(
           return;
         }
 
-        if (sharding->devices()->size() != (*buffers).size()) {
+        const int64_t num_addressable_devices =
+            sharding->devices()->AddressableDeviceList()->size();
+        if (num_addressable_devices != (*buffers).size()) {
           auto error = absl::FailedPreconditionError(absl::StrCat(
               "Number of buffers: ", (*buffers).size(),
-              " does not match the number of devices in sharding: ",
-              sharding->devices()->size()));
+              " does not match the number of addressable devices in sharding: ",
+              num_addressable_devices));
           buffers_promise.Set(error);
           ready_promise.Set(error);
           return;
@@ -111,13 +111,14 @@ absl::StatusOr<tsl::RCReference<BasicStringArray>> BasicStringArray::Create(
 }
 
 BasicStringArray::BasicStringArray(Client* client, Shape shape,
-                                   std::shared_ptr<const Sharding> sharding,
+                                   ShardingRef sharding,
                                    Future<Buffers> buffers,
                                    Future<> ready_future,
                                    OnDoneWithBuffer on_done_with_buffer)
     : client_(client),
       shape_(std::move(shape)),
       sharding_(std::move(sharding)),
+      user_context_(UserContextScope::current()),
       buffers_(std::move(buffers)),
       ready_future_(std::move(ready_future)),
       on_done_with_buffer_(std::move(on_done_with_buffer)) {}
@@ -155,15 +156,7 @@ Future<> BasicStringArray::GetReadyFuture() const {
   return ready_future_;
 }
 
-absl::StatusOr<std::vector<tsl::RCReference<Array>>>
-BasicStringArray::DisassembleIntoSingleDeviceArrays(
-    ArrayCopySemantics semantics) {
-  DCHECK(this);
-  return DisassembleIntoSingleDeviceArrays(
-      semantics, SingleDeviceShardSemantics::kAllShards);
-}
-
-absl::StatusOr<std::vector<tsl::RCReference<Array>>>
+absl::StatusOr<std::vector<ArrayRef>>
 BasicStringArray::DisassembleIntoSingleDeviceArrays(
     ArrayCopySemantics semantics,
     SingleDeviceShardSemantics single_device_shard_semantics) {
@@ -181,7 +174,10 @@ BasicStringArray::DisassembleIntoSingleDeviceArrays(
     return absl::FailedPreconditionError("Array has already been deleted");
   }
 
-  int num_shards = sharding_->devices()->size();
+  TF_ASSIGN_OR_RETURN(
+      auto shapes_and_shadings,
+      sharding_->Disassemble(shape_, single_device_shard_semantics));
+  const int num_shards = shapes_and_shadings.size();
 
   // For each single device array we are going to pre-make:
   //   (1) a Promise-Future pair for passing the buffers,
@@ -216,8 +212,8 @@ BasicStringArray::DisassembleIntoSingleDeviceArrays(
   on_done_with_buffer_callbacks.reserve(num_shards);
 
   for (int i = 0; i < num_shards; ++i) {
-    buffer_promises.push_back(Future<Buffers>::CreatePromise());
-    buffer_futures.push_back(Future<Buffers>(buffer_promises.back()));
+    std::tie(buffer_promises.emplace_back(), buffer_futures.emplace_back()) =
+        Future<Buffers>::MakePromise();
 
     auto current_shard_strings = std::make_shared<PerShardStringStore>();
     per_shard_strings.push_back(current_shard_strings);
@@ -249,9 +245,7 @@ BasicStringArray::DisassembleIntoSingleDeviceArrays(
   // Make and return the individual single device arrays. These will become
   // ready when the this (source) array becomes ready and the callback we set
   // up above runs.
-  TF_ASSIGN_OR_RETURN(auto shapes_and_shadings, sharding_->Disassemble(shape_));
-
-  std::vector<tsl::RCReference<Array>> arrays;
+  std::vector<ArrayRef> arrays;
   arrays.reserve(num_shards);
   for (int i = 0; i < num_shards; ++i) {
     TF_ASSIGN_OR_RETURN(auto array,
@@ -282,8 +276,8 @@ Future<> BasicStringArray::CopyToHostBuffer(
         sharding_->devices()->size())));
   }
 
-  auto copy_completion_promise = Future<>::CreatePromise();
-  auto copy_completion_future = Future<>(copy_completion_promise);
+  auto [copy_completion_promise, copy_completion_future] =
+      Future<>::MakePromise();
 
   buffers_.OnReady(
       [copy_completion_promise = std::move(copy_completion_promise),
@@ -302,7 +296,7 @@ Future<> BasicStringArray::CopyToHostBuffer(
   return copy_completion_future;
 }
 
-absl::StatusOr<tsl::RCReference<Array>> BasicStringArray::Copy(
+absl::StatusOr<ArrayRef> BasicStringArray::Copy(
     std::optional<xla::ifrt::DeviceListRef> devices,
     std::optional<xla::ifrt::MemoryKind> memory_kind,
     ArrayCopySemantics semantics) {
@@ -335,8 +329,7 @@ absl::StatusOr<tsl::RCReference<Array>> BasicStringArray::Copy(
 
   auto string_store = std::make_shared<StringStore>();
   auto on_done_with_buffer = [string_store]() {};
-  auto buffers_promise = Future<Buffers>::CreatePromise();
-  auto buffers_future = Future<Buffers>(buffers_promise);
+  auto [buffers_promise, buffers_future] = Future<Buffers>::MakePromise();
 
   auto copier = [string_store = std::move(string_store),
                  buffers_promise = std::move(buffers_promise)](
@@ -360,7 +353,7 @@ absl::StatusOr<tsl::RCReference<Array>> BasicStringArray::Copy(
 }
 
 // Makes a single sharded BasicStringArray from the first shard.
-absl::StatusOr<tsl::RCReference<Array>> BasicStringArray::FullyReplicatedShard(
+absl::StatusOr<ArrayRef> BasicStringArray::FullyReplicatedShard(
     ArrayCopySemantics semantics) {
   absl::MutexLock lock(&mu_);
   if (is_deleted_) {
@@ -385,8 +378,7 @@ absl::StatusOr<tsl::RCReference<Array>> BasicStringArray::FullyReplicatedShard(
 
   auto string_store = std::make_shared<StringStore>();
   auto on_done_with_buffer = [string_store]() {};
-  auto buffers_promise = Future<Buffers>::CreatePromise();
-  auto buffers_future = Future<Buffers>(buffers_promise);
+  auto [buffers_promise, buffers_future] = Future<Buffers>::MakePromise();
 
   auto copier = [string_store = std::move(string_store),
                  buffers_promise = std::move(buffers_promise)](
@@ -415,8 +407,8 @@ absl::StatusOr<tsl::RCReference<Array>> BasicStringArray::FullyReplicatedShard(
       std::move(buffers_future), std::move(on_done_with_buffer));
 }
 
-absl::StatusOr<std::shared_ptr<const PjRtLayout>> BasicStringArray::layout()
-    const {
+absl::StatusOr<std::shared_ptr<const xla::PjRtLayout>>
+BasicStringArray::pjrt_layout() const {
   return absl::UnimplementedError("String arrays do not support PjRtLayout");
 }
 

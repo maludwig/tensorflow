@@ -17,15 +17,15 @@ limitations under the License.
 
 #include <optional>
 
+#include <gtest/gtest.h>
 #include "absl/strings/string_view.h"
-#include "xla/tests/hlo_test_base.h"
-#include "tsl/platform/test.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 
 namespace xla {
 
 namespace {
 
-class ReductionDimensionGrouperTest : public HloTestBase {
+class ReductionDimensionGrouperTest : public HloHardwareIndependentTestBase {
  public:
   void CheckDimensionGrouper(absl::string_view hlo,
                              std::optional<absl::string_view> expected) {

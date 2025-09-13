@@ -28,6 +28,8 @@ RUN /setup.python.sh python3.10 /builder.requirements.txt
 RUN /setup.python.sh python3.11 /builder.requirements.txt
 RUN /setup.python.sh python3.13 /builder.requirements.txt
 RUN /setup.python.sh python3.13-nogil /builder.requirements.txt
+RUN /setup.python.sh python3.14 /builder.requirements.txt
+RUN /setup.python.sh python3.14-nogil /builder.requirements.txt
 
 # Since we are using python3.12 as the default python version, we need to
 # install python3.12 last for now.
@@ -35,15 +37,15 @@ RUN /setup.python.sh python3.13-nogil /builder.requirements.txt
 RUN /setup.python.sh python3.12 /builder.requirements.txt
 
 COPY setup.sources.cudnn.sh /setup.sources.cudnn.sh
-ARG INSTALL_CUDNN=false
-ARG CUDA_PACKAGES_FILE=cuda12.1_cudnn9.1.packages.txt
-COPY ${CUDA_PACKAGES_FILE} /cudnn.packages.txt
+ARG INSTALL_NVIDIA_PACKAGES=false
+ARG NVIDIA_PACKAGES_FILE=cuda12.1_cudnn9.1.packages.txt
+COPY ${NVIDIA_PACKAGES_FILE} /nvidia.packages.txt
 
-RUN if [ "${INSTALL_CUDNN}" = "true" ]; then \
-      echo "Installing cudnn"; \
-      /setup.sources.cudnn.sh && /setup.packages.sh /cudnn.packages.txt; \
+RUN if [ "${INSTALL_NVIDIA_PACKAGES}" = "true" ]; then \
+      echo "Installing Nvidia packages"; \
+      /setup.sources.cudnn.sh && /setup.packages.sh /nvidia.packages.txt; \
     else \
-      echo "cudnn is not installed"; \
+      echo "Nvidia packages are not installed"; \
     fi
 
 # Setup links for TensorFlow to compile.
@@ -76,7 +78,7 @@ RUN curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud
     tar zxf - google-cloud-sdk && \
     google-cloud-sdk/install.sh --quiet && \
     ln -s /google-cloud-sdk/bin/gcloud /usr/bin/gcloud
-ENV PATH="$PATH:/google-cloud-sdk/bin/"
+ENV PATH="$PATH:/google-cloud-sdk/bin/:/usr/local/cuda/bin/"
 
 # Download and install patchelf v0.18.0 from GitHub. The default Ubuntu focal
 # packages only provide the "0.10-2build1" version. We use patchelf to manipulate

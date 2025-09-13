@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/compiler/mlir/stablehlo/transforms/mhlo_passes/fuse_convolution_pass.h"
+
 #include <iterator>
 #include <memory>
 #include <utility>
@@ -36,8 +38,8 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
-#include "tensorflow/compiler/mlir/lite/utils/validators.h"
 #include "tensorflow/compiler/mlir/quantization/common/attrs_and_constraints.h"
+#include "tensorflow/compiler/mlir/utils/validators.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 
 namespace mlir {
@@ -95,7 +97,7 @@ class FuseMhloMulAndConvolutionPattern : public OpRewritePattern<mhlo::MulOp> {
     // format and backprop input conv filter is in HWOI format.
     // Only fuses multiplier if all dimensions other than the out channel
     // dimension are equal to 1.
-    if (!TFL::IsDimensionsDegenerateExceptLastOne(
+    if (!TF::IsDimensionsDegenerateExceptLastOne(
             mul_value.getShapedType().getShape())) {
       return rewriter.notifyMatchFailure(mul_op, [&](::mlir::Diagnostic &diag) {
         diag << "entities 'mul_value' failed to satisfy constraint: "
@@ -134,13 +136,15 @@ class FuseMhloMulAndConvolutionPattern : public OpRewritePattern<mhlo::MulOp> {
       auto dimsType = RankedTensorType::get({1}, rewriter.getIntegerType(64));
       broadcast_dims = DenseIntElementsAttr::get(dimsType, {filter_rank - 1});
     }
-    Value broadcast_multiplier = rewriter.create<mhlo::BroadcastInDimOp>(
-        mul_op.getLoc(), filter.getType(), multiplier, broadcast_dims);
-    Value new_filter = rewriter.create<mhlo::MulOp>(
-        mul_op.getLoc(), filter.getType(), filter, broadcast_multiplier);
-    Value new_conv = rewriter.create<mhlo::ConvolutionOp>(
-        mul_op.getLoc(), conv_op.getType(), conv_op.getLhs(), new_filter,
-        conv_op.getWindowStridesAttr(), conv_op.getPaddingAttr(),
+    Value broadcast_multiplier = mhlo::BroadcastInDimOp::create(
+        rewriter, mul_op.getLoc(), filter.getType(), multiplier,
+        broadcast_dims);
+    Value new_filter =
+        mhlo::MulOp::create(rewriter, mul_op.getLoc(), filter.getType(), filter,
+                            broadcast_multiplier);
+    Value new_conv = mhlo::ConvolutionOp::create(
+        rewriter, mul_op.getLoc(), conv_op.getType(), conv_op.getLhs(),
+        new_filter, conv_op.getWindowStridesAttr(), conv_op.getPaddingAttr(),
         conv_op.getLhsDilationAttr(), conv_op.getRhsDilationAttr(),
         conv_op.getWindowReversalAttr(), conv_op.getDimensionNumbers(),
         conv_op.getFeatureGroupCount(), conv_op.getBatchGroupCount(),
@@ -160,8 +164,8 @@ class FuseMhloMulAndConvolutionPattern : public OpRewritePattern<mhlo::MulOp> {
               conv_op) {
         return failure();
       }
-      Value new_shape_of = rewriter.create<shape::ShapeOfOp>(
-          mul_op.getLoc(), shape_of_op.getType(), new_conv);
+      Value new_shape_of = shape::ShapeOfOp::create(
+          rewriter, mul_op.getLoc(), shape_of_op.getType(), new_conv);
       shape_of_op.replaceAllUsesWith(new_shape_of);
       rewriter.replaceOp(mul_op, {new_conv});
     }

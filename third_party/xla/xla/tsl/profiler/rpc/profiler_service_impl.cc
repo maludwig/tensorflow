@@ -15,10 +15,13 @@ limitations under the License.
 
 #include "xla/tsl/profiler/rpc/profiler_service_impl.h"
 
+#include <cstdint>
 #include <memory>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_replace.h"
+#include "absl/synchronization/mutex.h"
 #include "grpcpp/support/status.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/env_time.h"
@@ -31,7 +34,6 @@ limitations under the License.
 #include "xla/tsl/profiler/utils/math_utils.h"
 #include "xla/tsl/profiler/utils/time_utils.h"
 #include "xla/tsl/profiler/utils/xplane_utils.h"
-#include "tsl/platform/mutex.h"
 #include "tsl/profiler/lib/profiler_session.h"
 #include "tsl/profiler/protobuf/profiler_service.grpc.pb.h"
 #include "tsl/profiler/protobuf/profiler_service.pb.h"
@@ -50,15 +52,21 @@ using tensorflow::TerminateResponse;
 
 // Collects data in XSpace format. The data is saved to a repository
 // unconditionally.
-absl::Status CollectDataToRepository(const ProfileRequest& request,
-                                     ProfilerSession* profiler,
-                                     ProfileResponse* response) {
+absl::Status CollectData(const ProfileRequest& request,
+                         ProfilerSession* profiler, ProfileResponse* response) {
   response->set_empty_trace(true);
   // Read the profile data into xspace.
-  XSpace xspace;
-  TF_RETURN_IF_ERROR(profiler->CollectData(&xspace));
-  VLOG(3) << "Collected XSpace to repository.";
-  response->set_empty_trace(IsEmpty(xspace));
+  tensorflow::profiler::XSpace xspace;
+  tensorflow::profiler::XSpace* xspace_ptr =
+      request.emit_xspace() ? response->mutable_xspace() : &xspace;
+  TF_RETURN_IF_ERROR(profiler->CollectData(xspace_ptr));
+  VLOG(3) << "Collected XSpace to "
+          << (request.emit_xspace() ? "response" : "repository") << ".";
+  response->set_empty_trace(IsEmpty(*xspace_ptr));
+
+  if (request.emit_xspace()) {
+    return absl::OkStatus();
+  }
 
   return SaveXSpace(request.repository_root(), request.session_id(),
                     request.host_name(), xspace);
@@ -83,21 +91,23 @@ class ProfilerServiceImpl : public tensorflow::grpc::ProfilerService::Service {
     }
 
     Env* env = Env::Default();
-    uint64 duration_ns = MilliToNano(req->opts().duration_ms());
-    uint64 deadline = GetCurrentTimeNanos() + duration_ns;
-    while (GetCurrentTimeNanos() < deadline) {
+    int64_t start_time_ns = GetCurrentTimeNanos();
+    // TODO(b/416884677): Handle server shutdown gracefully by surfacing a
+    // shutdown signal here and responding with what has been profiled so far.
+    while (NanoToMilli(GetCurrentTimeNanos() - start_time_ns) <
+           req->opts().duration_ms()) {
       env->SleepForMicroseconds(EnvTime::kMillisToMicros);
       if (ctx->IsCancelled()) {
         return ::grpc::Status::CANCELLED;
       }
       if (TF_PREDICT_FALSE(IsStopped(req->session_id()))) {
-        mutex_lock lock(mutex_);
+        absl::MutexLock lock(&mutex_);
         stop_signals_per_session_.erase(req->session_id());
         break;
       }
     }
 
-    status = CollectDataToRepository(*req, profiler.get(), response);
+    status = CollectData(*req, profiler.get(), response);
     if (!status.ok()) {
       return ::grpc::Status(::grpc::StatusCode::INTERNAL,
                             std::string(status.message()));
@@ -109,19 +119,19 @@ class ProfilerServiceImpl : public tensorflow::grpc::ProfilerService::Service {
   ::grpc::Status Terminate(::grpc::ServerContext* ctx,
                            const TerminateRequest* req,
                            TerminateResponse* response) override {
-    mutex_lock lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     stop_signals_per_session_[req->session_id()] = true;
     return ::grpc::Status::OK;
   }
 
  private:
   bool IsStopped(const std::string& session_id) {
-    mutex_lock lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     auto it = stop_signals_per_session_.find(session_id);
     return it != stop_signals_per_session_.end() && it->second;
   }
 
-  mutex mutex_;
+  absl::Mutex mutex_;
   absl::flat_hash_map<std::string, bool> stop_signals_per_session_
       ABSL_GUARDED_BY(mutex_);
 };

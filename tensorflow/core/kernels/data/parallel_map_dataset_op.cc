@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/base/call_once.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/synchronization/notification.h"
 #include "xla/tsl/platform/logging.h"
 #include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
@@ -504,7 +505,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           : uid(tensorflow::EnvTime::NowNanos()),
             checkpoint(MemoryCheckpoint{ctx->id_registry()}) {}
 
-      Notification notification;
+      absl::Notification notification;
       absl::Status status;
       std::vector<Tensor> return_values;
       bool end_of_input = false;
@@ -625,7 +626,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
         *end_of_sequence = false;
         return absl::OkStatus();
       }
-      if (errors::IsOutOfRange(result->status)) {
+      if (absl::IsOutOfRange(result->status)) {
         if (preserve_cardinality_) {
           // To guarantee that the transformation preserves the cardinality of
           // the dataset, we convert `OutOfRange` to `InvalidArgument` as the

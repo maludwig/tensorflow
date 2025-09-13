@@ -18,6 +18,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/platform/status_matchers.h"
 
@@ -62,7 +63,7 @@ TEST(GpuEventTest, AfterAllError) {
   event3.SetStateConcrete();
   EXPECT_TRUE(after_all.IsAvailable());
   EXPECT_THAT(after_all.GetError(),
-              StatusIs(absl::StatusCode::kInternal, "error"));
+              absl_testing::StatusIs(absl::StatusCode::kInternal, "error"));
 }
 
 TEST(TfrtEventSetTest, AfterAllEmpty) {
@@ -115,10 +116,10 @@ TEST(MarkEventReadyOnExitTest, EventReleaseAndReadyOnExit) {
   tsl::AsyncValueRef<GpuEvent> event =
       tsl::MakeConstructedAsyncValueRef<GpuEvent>();
   tsl::AsyncValueRef<GpuEvent> released_event =
-      MarkEventReadyOnExit(event).Release();
+      MarkGpuEventReadyOnExit(event).Release();
   EXPECT_EQ(event.GetAsyncValue(), released_event.GetAsyncValue());
   {
-    MarkEventReadyOnExit ready_on_exit(event);
+    MarkGpuEventReadyOnExit ready_on_exit(event);
     EXPECT_FALSE(event.IsAvailable());
   }
   EXPECT_TRUE(event.IsAvailable());

@@ -15,21 +15,21 @@ limitations under the License.
 
 #include "xla/python/ifrt/future.h"
 
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/types/span.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "xla/tsl/platform/status_matchers.h"
 
-namespace xla {
-namespace ifrt {
+namespace xla::ifrt {
 namespace {
 
 using ::testing::HasSubstr;
-using ::tsl::testing::StatusIs;
 
 TEST(FutureTest, JoinZeroFuture) {
   Future<> future = JoinFutures({});
@@ -38,28 +38,27 @@ TEST(FutureTest, JoinZeroFuture) {
 }
 
 TEST(FutureTest, JoinOneOkFuture) {
-  Promise<> promise = Future<>::CreatePromise();
-  std::vector<Future<>> futures;
-  futures.push_back(Future<>(promise));
+  auto [promise, future] = Future<>::MakePromise();
+  std::vector<Future<>> futures = {std::move(future)};
 
-  Future<> future = JoinFutures(absl::MakeSpan(futures));
+  Future<> joined = JoinFutures(absl::MakeSpan(futures));
 
-  ASSERT_FALSE(future.IsReady());
+  ASSERT_FALSE(joined.IsReady());
   promise.Set(absl::OkStatus());
-  TF_EXPECT_OK(future.Await());
+  TF_EXPECT_OK(joined.Await());
 }
 
 TEST(FutureTest, JoinOneFailingFuture) {
-  Promise<> promise = Future<>::CreatePromise();
-  std::vector<Future<>> futures;
-  futures.push_back(Future<>(promise));
+  auto [promise, future] = Future<>::MakePromise();
+  std::vector<Future<>> futures = {std::move(future)};
 
-  Future<> future = JoinFutures(absl::MakeSpan(futures));
+  Future<> joined = JoinFutures(absl::MakeSpan(futures));
 
-  ASSERT_FALSE(future.IsReady());
+  ASSERT_FALSE(joined.IsReady());
   promise.Set(absl::InvalidArgumentError("Some error"));
-  EXPECT_THAT(future.Await(), StatusIs(absl::StatusCode::kInvalidArgument,
-                                       HasSubstr("Some error")));
+  EXPECT_THAT(joined.Await(),
+              absl_testing::StatusIs(absl::StatusCode::kInvalidArgument,
+                                     HasSubstr("Some error")));
 }
 
 TEST(FutureTest, JoinAllOkFutures) {
@@ -69,17 +68,17 @@ TEST(FutureTest, JoinAllOkFutures) {
   promises.reserve(kNumFutures);
   futures.reserve(kNumFutures);
   for (int i = 0; i < kNumFutures; ++i) {
-    promises.push_back(Future<>::CreatePromise());
-    futures.push_back(Future<>(promises.back()));
+    std::tie(promises.emplace_back(), futures.emplace_back()) =
+        Future<>::MakePromise();
   }
 
-  Future<> future = JoinFutures(absl::MakeSpan(futures));
+  Future<> joined = JoinFutures(absl::MakeSpan(futures));
 
-  ASSERT_FALSE(future.IsReady());
+  ASSERT_FALSE(joined.IsReady());
   for (Promise<>& promise : promises) {
     promise.Set(absl::OkStatus());
   }
-  TF_EXPECT_OK(future.Await());
+  TF_EXPECT_OK(joined.Await());
 }
 
 TEST(FutureTest, JoinAllFailingFutures) {
@@ -89,18 +88,19 @@ TEST(FutureTest, JoinAllFailingFutures) {
   promises.reserve(kNumFutures);
   futures.reserve(kNumFutures);
   for (int i = 0; i < kNumFutures; ++i) {
-    promises.push_back(Future<>::CreatePromise());
-    futures.push_back(Future<>(promises.back()));
+    std::tie(promises.emplace_back(), futures.emplace_back()) =
+        Future<>::MakePromise();
   }
 
-  Future<> future = JoinFutures(absl::MakeSpan(futures));
+  Future<> joined = JoinFutures(absl::MakeSpan(futures));
 
-  ASSERT_FALSE(future.IsReady());
+  ASSERT_FALSE(joined.IsReady());
   for (Promise<>& promise : promises) {
     promise.Set(absl::InvalidArgumentError("Some error"));
   }
-  EXPECT_THAT(future.Await(), StatusIs(absl::StatusCode::kInvalidArgument,
-                                       HasSubstr("Some error")));
+  EXPECT_THAT(joined.Await(),
+              absl_testing::StatusIs(absl::StatusCode::kInvalidArgument,
+                                     HasSubstr("Some error")));
 }
 
 class JoinAllOkFuturesExceptForOneTest : public testing::TestWithParam<int> {};
@@ -113,13 +113,13 @@ TEST_P(JoinAllOkFuturesExceptForOneTest, JoinAllOkFuturesExceptForOne) {
   promises.reserve(kNumFutures);
   futures.reserve(kNumFutures);
   for (int i = 0; i < kNumFutures; ++i) {
-    promises.push_back(Future<>::CreatePromise());
-    futures.push_back(Future<>(promises.back()));
+    std::tie(promises.emplace_back(), futures.emplace_back()) =
+        Future<>::MakePromise();
   }
 
-  Future<> future = JoinFutures(absl::MakeSpan(futures));
+  Future<> joined = JoinFutures(absl::MakeSpan(futures));
 
-  ASSERT_FALSE(future.IsReady());
+  ASSERT_FALSE(joined.IsReady());
   for (int i = 0; i < kNumFutures; ++i) {
     if (i == failing_future_idx) {
       promises[i].Set(absl::InvalidArgumentError("Some error"));
@@ -127,13 +127,13 @@ TEST_P(JoinAllOkFuturesExceptForOneTest, JoinAllOkFuturesExceptForOne) {
       promises[i].Set(absl::OkStatus());
     }
   }
-  EXPECT_THAT(future.Await(), StatusIs(absl::StatusCode::kInvalidArgument,
-                                       HasSubstr("Some error")));
+  EXPECT_THAT(joined.Await(),
+              absl_testing::StatusIs(absl::StatusCode::kInvalidArgument,
+                                     HasSubstr("Some error")));
 }
 
 INSTANTIATE_TEST_SUITE_P(FutureTest, JoinAllOkFuturesExceptForOneTest,
                          testing::Range(0, 3));
 
 }  // namespace
-}  // namespace ifrt
-}  // namespace xla
+}  // namespace xla::ifrt

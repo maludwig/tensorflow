@@ -20,6 +20,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/Target/LLVMIR/Export.h"  // from @llvm-project
@@ -41,6 +42,7 @@ limitations under the License.
 #include "xla/service/gpu/llvm_gpu_backend/nvptx_backend.h"
 #include "xla/stream_executor/cuda/cuda_asm_compiler.h"
 #elif TENSORFLOW_USE_ROCM
+#include "xla/service/gpu/llvm_gpu_backend/amdgpu_backend.h"
 #include "xla/stream_executor/gpu/asm_compiler.h"
 #include "tensorflow/core/platform/rocm_rocdl_path.h"
 #endif
@@ -141,7 +143,7 @@ class GpuKernelToBlobPass
         "false";
 
     llvmModule->setDataLayout(xla::gpu::nvptx::DataLayout());
-    llvmModule->setTargetTriple(xla::gpu::nvptx::TargetTriple());
+    llvmModule->setTargetTriple(llvm::Triple(xla::gpu::nvptx::TargetTriple()));
 
     // Compile and collect requested cubin and PTX images.
     std::vector<tensorflow::se::CubinOrPTXImage> images;
@@ -176,8 +178,7 @@ class GpuKernelToBlobPass
       if (!is_compute_profile) {
         auto gpu_asm = tensorflow::se::CompileGpuAsm(cc, ptx, gpu_asm_opts);
         if (gpu_asm.ok()) {
-          images.push_back(
-              {absl::StrCat("sm_", arch), std::move(gpu_asm.value())});
+          images.push_back({/*is_ptx=*/false, cc, std::move(gpu_asm.value())});
         } else {
 #ifdef PLATFORM_GOOGLE
           // Require compilation with ptxas.
@@ -195,8 +196,7 @@ class GpuKernelToBlobPass
         ptx_bytes.reserve(ptx.size() + 1);
         std::copy(ptx.begin(), ptx.end(), std::back_inserter(ptx_bytes));
         ptx_bytes.push_back('\0');
-        images.push_back(
-            {absl::StrCat("compute_", arch), std::move(ptx_bytes)});
+        images.push_back({/*is_ptx=*/true, cc, std::move(ptx_bytes)});
       }
     }
 

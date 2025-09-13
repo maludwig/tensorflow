@@ -16,7 +16,6 @@ limitations under the License.
 #include "xla/service/gpu/gpu_executable.h"
 
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -26,31 +25,32 @@ limitations under the License.
 #include <variant>
 #include <vector>
 
-#include "absl/algorithm/container.h"
-#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "xla/backends/gpu/collectives/gpu_clique.h"
 #include "xla/backends/gpu/collectives/gpu_clique_key.h"
-#include "xla/backends/gpu/collectives/gpu_cliques.h"
 #include "xla/backends/gpu/runtime/annotation.h"
+#include "xla/backends/gpu/runtime/command_buffer_conversion_pass.h"
+#include "xla/backends/gpu/runtime/nvshmem_collective_thunk.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
-#include "xla/core/collectives/rank_id.h"
+#include "xla/backends/gpu/runtime/thunk_pass_pipeline.h"
 #include "xla/executable_run_options.h"
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/map_util.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/service/dump.h"
 #include "xla/service/executable.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/buffer_allocations.h"
@@ -65,9 +65,11 @@ limitations under the License.
 #include "xla/service/shaped_buffer.h"
 #include "xla/service/stream_pool.h"
 #include "xla/service/xla_debug_info_manager.h"
+#include "xla/shape.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
+#include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/cuda/cuda_platform_id.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_memory.h"
@@ -80,14 +82,13 @@ limitations under the License.
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/sycl/sycl_platform_id.h"
+#include "xla/tsl/platform/env_time.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/env_time.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
 #include "tsl/platform/random.h"
-#include "tsl/platform/status.h"
-#include "tsl/platform/statusor.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
 #include "tsl/profiler/lib/traceme.h"
 
@@ -110,8 +111,33 @@ static absl::flat_hash_set<ExecutionStreamId> GetExecutionStreamIds(
   return stream_ids;
 }
 
+static absl::Status RunThunkPasses(const DebugOptions& debug_options,
+                                   const se::DeviceDescription& device_info,
+                                   SequentialThunk* root_thunk,
+                                   HloModule* hlo_module) {
+  ThunkPassPipeline pipeline("thunk-passes");
+  if (debug_options.xla_gpu_experimental_enable_command_buffer_on_thunks()) {
+    pipeline.AddPass(std::make_unique<CommandBufferConversionPass>());
+  }
+  TF_ASSIGN_OR_RETURN(bool changed,
+                      pipeline.Run(root_thunk, debug_options, device_info));
+  if (changed) {
+    VLOG(3) << "Thunk passes changed the thunk tree.";
+    if (hlo_module && DumpingEnabledForHloModule(*hlo_module)) {
+      DumpToFileInDirOrStdout(
+          *hlo_module, "",
+          absl::StrCat("thunk_sequence_after_thunk_passes", ".txt"),
+          root_thunk->ToString(/*indent=*/0));
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::StatusOr<std::unique_ptr<GpuExecutable>> GpuExecutable::Create(
     Params params) {
+  TF_RETURN_IF_ERROR(
+      RunThunkPasses(params.debug_options, params.device_description,
+                     params.executable.get(), params.debug_module.get()));
   return std::unique_ptr<GpuExecutable>(new GpuExecutable(std::move(params)));
 }
 
@@ -122,15 +148,16 @@ GpuExecutable::GpuExecutable(GpuExecutable::Params params)
       text_(std::move(params.asm_text)),
       binary_(std::move(params.binary)),
       dnn_compiled_graphs_(std::move(params.dnn_compiled_graphs)),
-      gpu_version_(params.gpu_version),
+      gpu_version_(params.device_description.gpu_compute_capability()),
       thunks_(std::move(params.executable)),
       execution_stream_ids_(GetExecutionStreamIds(*thunks_)),
       module_name_(params.module_name),
-      output_shape_(params.output_shape),
+      program_shape_(params.program_shape),
       allocations_(std::move(params.mlir_allocations)),
       buffer_assignment_(std::move(params.buffer_assignment)),
+      alias_info_(std::move(params.alias_info)),
       debug_buffer_assignment_show_max_(
-          params.debug_buffer_assignment_show_max),
+          params.debug_options.xla_debug_buffer_assignment_show_max()),
       constants_(std::move(params.constants)),
       output_info_(std::move(params.output_info)),
       enable_debug_info_manager_(params.enable_debug_info_manager) {
@@ -144,7 +171,7 @@ GpuExecutable::GpuExecutable(GpuExecutable::Params params)
   }
   if (has_module() && enable_debug_info_manager_) {
     XlaDebugInfoManager::Get()->RegisterModule(shared_module(),
-                                               buffer_assignment_->ToProto());
+                                               buffer_assignment_);
   }
 }
 
@@ -195,6 +222,9 @@ absl::Status RendezvousAfterInitialization(
     const ServiceExecutableRunOptions* run_options,
     const DebugOptions* debug_options);
 
+absl::Status BarrierAfterExecutable(const DebugOptions* debug_options,
+                                    se::Stream* stream_to_sync);
+
 absl::Status ExecuteThunksImpl(
     const DebugOptions* debug_options, const std::string& module_name,
     ModuleIdentifier module_id, SequentialThunk& thunk_sequence,
@@ -217,13 +247,6 @@ absl::Status ExecuteThunksImpl(
   bool use_highest_priority_for_async_stream =
       debug_options
           ? debug_options->xla_gpu_enable_highest_priority_async_stream()
-          : false;
-
-  bool requires_exclusive_lock_on_gpu =
-      run_options->run_options().gpu_executable_run_options()
-          ? run_options->run_options()
-                .gpu_executable_run_options()
-                ->requires_exclusive_lock_on_gpu()
           : false;
 
   se::Stream* main_stream = run_options->stream();
@@ -295,7 +318,7 @@ absl::Status ExecuteThunksImpl(
   {  // Collect resource requirements from thunks.
     Thunk::PrepareParams prepare_params{&collective_params};
 
-    tsl::profiler::TraceMe trace([&] { return "Thunks::Prepare"; });
+    tsl::profiler::TraceMe trace_prepare("Thunks::Prepare");
     TF_RETURN_IF_ERROR(
         thunk_sequence.Prepare(prepare_params, resource_requests));
   }
@@ -322,10 +345,9 @@ absl::Status ExecuteThunksImpl(
         &collective_params,
         &collective_cliques,
         run_options->run_options().ffi_execution_context(),
-        run_options->local_device_count(),
-        requires_exclusive_lock_on_gpu};
+        run_options->local_device_count()};
 
-    tsl::profiler::TraceMe trace([&] { return "Thunks::Initialize"; });
+    tsl::profiler::TraceMe trace_initialize("Thunks::Initialize");
     TF_RETURN_IF_ERROR(thunk_sequence.Initialize(initialize_params));
   }
 
@@ -351,6 +373,9 @@ absl::Status ExecuteThunksImpl(
   VLOG(1) << "[" << run_options->device_ordinal() << "] "
           << "End GpuExecutable::ExecuteOnStream module: " << module_name;
 
+  if (collective_params.need_barrier) {
+    TF_RETURN_IF_ERROR(BarrierAfterExecutable(debug_options, main_stream));
+  }
   return MaybeSyncAndProfile(run_options, execution_timer.get(),
                              block_host_until_done ? main_stream : nullptr);
 }
@@ -426,7 +451,7 @@ absl::Status RendezvousAfterInitialization(
       run_options->device_ordinal(),
       run_options->run_options().run_id().ToInt());
 
-  Rendezvous(
+  return Rendezvous(
       rendezvous_name, rendezvous_key, num_local_participants,
       absl::Seconds(
           debug_options
@@ -436,8 +461,6 @@ absl::Status RendezvousAfterInitialization(
           debug_options
               ? debug_options->xla_gpu_executable_terminate_timeout_seconds()
               : 30));
-
-  return absl::OkStatus();
 }
 
 absl::Status MaybeSyncAndProfile(const ServiceExecutableRunOptions* run_options,
@@ -467,6 +490,18 @@ absl::Status MaybeSyncAndProfile(const ServiceExecutableRunOptions* run_options,
     }
   }
 
+  return absl::OkStatus();
+}
+
+absl::Status BarrierAfterExecutable(const DebugOptions* debug_options,
+                                    se::Stream* stream) {
+  if (debug_options->xla_gpu_experimental_enable_nvshmem()) {
+    TF_ASSIGN_OR_RETURN(auto* collectives, GetNvshmemCollectivesFromRegistry());
+    TF_ASSIGN_OR_RETURN(std::unique_ptr<Communicator> nvshmem_comm,
+                        collectives->CreateCommunicator());
+
+    TF_RETURN_IF_ERROR(nvshmem_comm->Barrier(GpuCollectives::On(*stream)));
+  }
   return absl::OkStatus();
 }
 
@@ -709,8 +744,9 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
   const int device_ordinal = run_options->device_ordinal() != -1
                                  ? run_options->device_ordinal()
                                  : executor->device_ordinal();
-  ExecutionOutput result(/*on_device_shape=*/output_shape_, memory_allocator,
-                         device_ordinal, executor->device_ordinal());
+  ExecutionOutput result(/*on_device_shape=*/program_shape_.result(),
+                         memory_allocator, device_ordinal,
+                         executor->device_ordinal());
 
   TF_ASSIGN_OR_RETURN(
       BufferAllocations buffer_allocations,
@@ -789,14 +825,15 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
         // result, if the ExecutionOutput is not committed.
         result.AddAliasedIndex(index);
       } else if (!output_info.passthrough &&
-                 !ShapeUtil::GetSubshape(output_shape_, index).IsTuple()) {
+                 !ShapeUtil::GetSubshape(program_shape_.result(), index)
+                      .IsTuple()) {
         // The guard is above is not to insert copy-protection when aliasing
         // pass-through params, as we do not need to write into the output
         // buffer.
         VLOG(3) << "Using copy-protection: aliasing is specified, but the "
                    "buffer is not donated; allocating a fresh buffer";
-        int64_t allocation_size =
-            ShapeUtil::ByteSizeOf(ShapeUtil::GetSubshape(output_shape_, index));
+        int64_t allocation_size = ShapeUtil::ByteSizeOf(
+            ShapeUtil::GetSubshape(program_shape_.result(), index));
         absl::StatusOr<se::OwningDeviceMemory> allocated_buffer =
             memory_allocator->Allocate(device_ordinal, allocation_size,
                                        /*retry_on_failure=*/true,
@@ -845,12 +882,18 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
 absl::Status GpuExecutable::VerboseAllocationError(absl::Status s) {
   return ResourceExhausted(
       "%s\n%s\n", s.message(),
-      buffer_assignment_->ToVerboseString(debug_buffer_assignment_show_max_));
+      buffer_assignment_->ToVerboseString(alias_info_.get(),
+                                          debug_buffer_assignment_show_max_));
 }
 
 absl::Status GpuExecutable::ExecuteThunks(
     const BufferAllocations& buffer_allocations,
     const ServiceExecutableRunOptions* run_options) {
+  tsl::profiler::TraceMe trace([&] {
+    return tsl::profiler::TraceMeEncode("GpuExecutable::ExecuteThunks",
+                                        {{"module_name", module_name_}});
+  });
+
   if (VLOG_IS_ON(5)) {
     se::StreamExecutor* executor = run_options->stream()->parent();
     // Debug code to compare current allocation's address with previous run's
@@ -956,5 +999,56 @@ GetOutputInfo(const HloModule& hlo_module, const BufferAssignment& assignment) {
   return output;
 }
 
+OutputInfoProto GpuExecutable::OutputInfo::ToProto() const {
+  OutputInfoProto proto;
+  proto.set_allocation_index(allocation_index);
+  proto.set_passthrough(passthrough);
+
+  if (alias_config.has_value()) {
+    proto.mutable_alias_config()->set_parameter_number(
+        alias_config->parameter_number);
+    proto.mutable_alias_config()->mutable_parameter_shape_index()->Assign(
+        alias_config->parameter_index.begin(),
+        alias_config->parameter_index.end());
+
+    switch (alias_config->kind) {
+      case xla::HloInputOutputAliasConfig::AliasKind::kMayAlias:
+        proto.mutable_alias_config()->set_kind(Kind::MAY_ALIAS);
+        break;
+      case xla::HloInputOutputAliasConfig::AliasKind::kMustAlias:
+        proto.mutable_alias_config()->set_kind(Kind::MUST_ALIAS);
+        break;
+    }
+  }
+
+  return proto;
+}
+
+absl::StatusOr<GpuExecutable::OutputInfo> GpuExecutable::OutputInfo::FromProto(
+    const OutputInfoProto& proto) {
+  OutputInfo output_info;
+  output_info.allocation_index = proto.allocation_index();
+  output_info.passthrough = proto.passthrough();
+  if (proto.has_alias_config()) {
+    xla::HloInputOutputAliasConfig::AliasKind alias_kind;
+    switch (proto.alias_config().kind()) {
+      case Kind::MAY_ALIAS:
+        alias_kind = xla::HloInputOutputAliasConfig::AliasKind::kMayAlias;
+        break;
+      case Kind::MUST_ALIAS:
+        alias_kind = xla::HloInputOutputAliasConfig::AliasKind::kMustAlias;
+        break;
+      default:
+        return absl::InvalidArgumentError("Given alias kind is invalid");
+    }
+    const auto& parameter_shape_index =
+        proto.alias_config().parameter_shape_index();
+    output_info.alias_config.emplace(
+        proto.alias_config().parameter_number(),
+        ShapeIndex{parameter_shape_index.begin(), parameter_shape_index.end()},
+        alias_kind);
+  }
+  return output_info;
+}
 }  // namespace gpu
 }  // namespace xla

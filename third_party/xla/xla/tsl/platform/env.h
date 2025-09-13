@@ -26,13 +26,13 @@ limitations under the License.
 
 #include "absl/functional/any_invocable.h"
 #include "absl/strings/ascii.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/tsl/platform/env_time.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/file_system.h"
 #include "xla/tsl/platform/macros.h"
 #include "xla/tsl/platform/status.h"
 #include "xla/tsl/platform/types.h"
-#include "tsl/platform/mutex.h"
 #include "tsl/platform/numa.h"
 #include "tsl/platform/platform.h"
 #include "tsl/platform/protobuf.h"
@@ -347,15 +347,6 @@ class Env {
   ///  TF
   absl::Status HasAtomicMove(const std::string& path, bool* has_atomic_move);
 
-  /// Returns whether the give path is on a file system
-  /// that has ability to create a new temp file. This can be used
-  /// to determine if there needs to be a temp location to safely write objects.
-  /// If this returns false, TensorFlow will write directly to output files
-  /// instead of creating a temporary file and swapping it in. This may mean
-  /// that incomplete writes are visible to consumers.
-  absl::Status CanCreateTempFile(const std::string& fname,
-                                 bool* can_create_temp_file);
-
   /// Stores the size of `fname` in `*file_size`.
   absl::Status GetFileSize(const std::string& fname, uint64* file_size);
 
@@ -457,6 +448,15 @@ class Env {
   virtual Thread* StartThread(
       const ThreadOptions& thread_options, const std::string& name,
       absl::AnyInvocable<void()> fn) TF_MUST_USE_RESULT = 0;
+
+  /// \brief Starts a new detached thread that runs fn() and is identified
+  /// (for debugging/performance-analysis) by "name".
+  ///
+  virtual void StartDetachedThread(const ThreadOptions& thread_options,
+                                   const std::string& name,
+                                   absl::AnyInvocable<void()> fn) {
+    LOG(FATAL) << "StartDetachedThread is not implemented in this environment.";
+  }
 
   // Returns the thread id of calling thread.
   // Posix: Returns pthread id which is only guaranteed to be unique within a
@@ -560,6 +560,12 @@ class EnvWrapper : public Env {
                       absl::AnyInvocable<void()> fn) override {
     return target_->StartThread(thread_options, name, std::move(fn));
   }
+  void StartDetachedThread(const ThreadOptions& thread_options,
+                           const std::string& name,
+                           absl::AnyInvocable<void()> fn) override {
+    target_->StartDetachedThread(thread_options, name, std::move(fn));
+  }
+
   int64_t GetCurrentThreadId() override {
     return target_->GetCurrentThreadId();
   }

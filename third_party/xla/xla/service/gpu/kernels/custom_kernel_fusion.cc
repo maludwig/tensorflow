@@ -19,7 +19,6 @@ limitations under the License.
 #include <string>
 #include <utility>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
@@ -32,7 +31,7 @@ namespace xla::gpu {
 //===----------------------------------------------------------------------===//
 
 CustomKernelFusionRegistry* CustomKernelFusionRegistry::Default() {
-  static auto* registry = new CustomKernelFusionRegistry();
+  static auto* const registry = new CustomKernelFusionRegistry();
   return registry;
 }
 

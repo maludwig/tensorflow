@@ -45,13 +45,20 @@ class HloPrintOptions {
                            // not in a sequential context.
   };
 
+  enum class PrintComputationMode {
+    kComputationOnly,              // Print the computation.
+    kComputationWithEntryKeyword,  // Print the computation with ENTRY if it is
+                                   // the entry computation.
+  };
+
   // Constructs the default print options: don't print large constants, don't
   // compact operands, no indentation.
   constexpr HloPrintOptions()
       : print_operand_index_annotation_interval_(5),
         print_subcomputation_mode_(PrintSubcomputationMode::kNameOnly),
+        print_computation_mode_(PrintComputationMode::kComputationOnly),
         indent_amount_(0),
-        print_large_constants_(true),
+        print_large_constants_(false),
         print_only_essential_constants_(false),
         print_original_value_(true),
         print_metadata_(true),
@@ -165,6 +172,11 @@ class HloPrintOptions {
   HloPrintOptions& set_print_subcomputation_mode(
       PrintSubcomputationMode value) {
     print_subcomputation_mode_ = value;
+    return *this;
+  }
+
+  HloPrintOptions& set_print_computation_mode(PrintComputationMode value) {
+    print_computation_mode_ = value;
     return *this;
   }
 
@@ -370,6 +382,9 @@ class HloPrintOptions {
   PrintSubcomputationMode print_subcomputation_mode() const {
     return print_subcomputation_mode_;
   }
+  PrintComputationMode print_computation_mode() const {
+    return print_computation_mode_;
+  }
   bool print_original_value() const { return print_original_value_; }
   bool print_metadata() const { return print_metadata_; }
   bool print_metadata_only_op_name() const {
@@ -415,6 +430,7 @@ class HloPrintOptions {
   // the annotation, 1 means print annotation for every operand.
   int64_t print_operand_index_annotation_interval_;
   PrintSubcomputationMode print_subcomputation_mode_;
+  PrintComputationMode print_computation_mode_;
   int indent_amount_;
   bool print_large_constants_;
   bool print_only_essential_constants_;
@@ -448,7 +464,7 @@ class HloPrintOptions {
 // where <xxx> is an index starting from 0.
 class CanonicalNameMap {
  public:
-  const std::string& LookupOrInsert(int unique_id) {
+  const std::string& LookupOrInsert(int64_t unique_id) {
     std::string& canonical_name = canonical_name_map_[unique_id];
     if (canonical_name.empty()) {
       absl::StrAppend(&canonical_name, "tmp_", canonical_name_map_.size() - 1);
@@ -459,7 +475,7 @@ class CanonicalNameMap {
   void Reserve(size_t size) { canonical_name_map_.reserve(size); }
 
  private:
-  absl::flat_hash_map<int, std::string> canonical_name_map_;
+  absl::flat_hash_map<int64_t, std::string> canonical_name_map_;
 };
 
 }  // namespace xla

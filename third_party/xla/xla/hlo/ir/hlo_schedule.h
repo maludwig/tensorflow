@@ -45,6 +45,7 @@ class HloInstructionSequence {
   HloInstructionSequence() = default;
   explicit HloInstructionSequence(
       absl::Span<HloInstruction* const> instructions) {
+    reserve(instructions.size());
     for (HloInstruction* instruction : instructions) {
       push_back(instruction);
     }
@@ -74,7 +75,8 @@ class HloInstructionSequence {
   void remove_instruction(HloInstruction* instruction) {
     auto instruction_it = std::find(instruction_sequence_.begin(),
                                     instruction_sequence_.end(), instruction);
-    if (instruction_it != instruction_sequence_.end()) {
+    if (instruction_it != instruction_sequence_.end() &&
+        instruction->parent() != nullptr) {
       auto id_it = std::find(id_sequence_.begin(), id_sequence_.end(),
                              instruction->unique_id());
       instruction_sequence_.erase(instruction_it);
@@ -124,7 +126,17 @@ class HloInstructionSequence {
   }
 
   // Returns the unique IDs of the instructions in the sequence (in order).
-  const std::vector<int>& ids() const { return id_sequence_; }
+  const std::vector<int64_t>& ids() const { return id_sequence_; }
+
+  // Updates the sequence of unique IDs to match the sequence of instructions.
+  // This is required when the HLO Module calls Cleanup(), which invalidates
+  // the old unique IDs.
+  void update_id_sequence() {
+    id_sequence_.clear();
+    for (HloInstruction* instruction : instruction_sequence_) {
+      id_sequence_.push_back(instruction->unique_id());
+    }
+  }
 
  private:
   // The sequence as HloInstructions.
@@ -135,7 +147,7 @@ class HloInstructionSequence {
   // sequence may be referenced after transformations to the HLO graph and HLO
   // pointers can be invalidated or recycled in this process (see
   // HloSchedule::Update).
-  std::vector<int> id_sequence_;
+  std::vector<int64_t> id_sequence_;
 };
 
 // A class representing a sequential schedule of instructions for an HLO

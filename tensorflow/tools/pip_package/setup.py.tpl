@@ -54,9 +54,21 @@ from setuptools.dist import Distribution
 # result for pip.
 _VERSION = '0.0.0'
 
-# Update this version when a new libtpu stable version is released.
-LATEST_RELEASE_LIBTPU_VERSION = '0.0.10'
-NEXT_LIBTPU_VERSION = '0.0.11'
+cuda_version = 0  # placeholder
+cuda_wheel_suffix = ''  # placeholder
+
+nvidia_cublas_version = ''  # placeholder
+nvidia_cuda_cupti_version = ''  # placeholder
+nvidia_cuda_nvcc_version = ''  # placeholder
+nvidia_cuda_runtime_version = ''  # placeholder
+nvidia_cudnn_version = ''  # placeholder
+nvidia_cufft_version = ''  # placeholder
+nvidia_cusolver_version = ''  # placeholder
+nvidia_cusparse_version = ''  # placeholder
+nvidia_nccl_version = ''  # placeholder
+nvidia_nvjitlink_version = ''  # placeholder
+nvidia_cuda_nvrtc_version = ''  # placeholder
+nvidia_curand_version = ''  # placeholder
 
 # We use the same setup.py for all tensorflow_* packages and for the nightly
 # equivalents (tf_nightly_*). The package is controlled from the argument line
@@ -85,13 +97,13 @@ def standard_or_nightly(standard, nightly):
 REQUIRED_PACKAGES = [
     'absl-py >= 1.0.0',
     'astunparse >= 1.6.0',
-    'flatbuffers >= 24.3.25',
+    'flatbuffers >= 25.2.10',
     'gast >=0.2.1,!=0.5.0,!=0.5.1,!=0.5.2',
     'google_pasta >= 0.1.1',
     'libclang >= 13.0.0',
     'opt_einsum >= 2.3.2',
     'packaging',
-    'protobuf>=4.21.6,<6.0.0dev',
+    'protobuf >= 6.31.1, < 8.0.0',
     'requests >= 2.21.0, < 3',
     'setuptools',
     'six >= 1.12.0',
@@ -111,9 +123,9 @@ REQUIRED_PACKAGES = [
     # dependencies on the release branch is updated to the stable releases (RC
     # or final). For example, 'keras-nightly ~= 2.14.0.dev' will be replaced by
     # 'keras >= 2.14.0rc0, < 2.15' on the release branch after the branch cut.
-    'tb-nightly ~= 2.19.0.a',
-    'keras-nightly >= 3.6.0.dev',
-    'numpy >= 1.26.0, < 2.2.0',
+    'tb-nightly ~= 2.20.0.a',
+    'keras-nightly >= 3.10.0.dev',
+    'numpy >= 1.26.0',
     'h5py >= 3.11.0',
     'ml_dtypes >= 0.5.1, < 1.0.0',
 ]
@@ -126,8 +138,6 @@ FAKE_REQUIRED_PACKAGES = [
     # different architectures having different requirements.
     # The entries here should be a simple duplicate of those in the collaborator
     # build section.
-    standard_or_nightly('tensorflow-intel', 'tf-nightly-intel') + '==' +
-    _VERSION + ';platform_system=="Windows"',
 ]
 
 if platform.system() == 'Linux' and platform.machine() == 'x86_64':
@@ -151,18 +161,18 @@ if collaborator_build:
 EXTRA_PACKAGES = {
     'and-cuda': [
         # TODO(nluehr): set nvidia-* versions based on build components.
-        'nvidia-cublas-cu12 == 12.5.3.2',
-        'nvidia-cuda-cupti-cu12 == 12.5.82',
-        'nvidia-cuda-nvcc-cu12 == 12.5.82',
-        'nvidia-cuda-nvrtc-cu12 == 12.5.82',
-        'nvidia-cuda-runtime-cu12 == 12.5.82',
-        'nvidia-cudnn-cu12 == 9.3.0.75',
-        'nvidia-cufft-cu12 == 11.2.3.61',
-        'nvidia-curand-cu12 == 10.3.6.82',
-        'nvidia-cusolver-cu12 == 11.6.3.83',
-        'nvidia-cusparse-cu12 == 12.5.1.3',
-        'nvidia-nccl-cu12 == 2.25.1',
-        'nvidia-nvjitlink-cu12 == 12.5.82',
+        f'nvidia-cublas{cuda_wheel_suffix}{nvidia_cublas_version}',
+        f'nvidia-cuda-cupti{cuda_wheel_suffix}{nvidia_cuda_cupti_version}',
+        f'nvidia-cuda-nvcc{cuda_wheel_suffix}{nvidia_cuda_nvcc_version}',
+        f'nvidia-cuda-nvrtc{cuda_wheel_suffix}{nvidia_cuda_nvrtc_version}',
+        f'nvidia-cuda-runtime{cuda_wheel_suffix}{nvidia_cuda_runtime_version}',
+        f'nvidia-cudnn-cu{cuda_version}{nvidia_cudnn_version}',
+        f'nvidia-cufft{cuda_wheel_suffix}{nvidia_cufft_version}',
+        f'nvidia-curand{cuda_wheel_suffix}{nvidia_curand_version}',
+        f'nvidia-cusolver{cuda_wheel_suffix}{nvidia_cusolver_version}',
+        f'nvidia-cusparse{cuda_wheel_suffix}{nvidia_cusparse_version}',
+        f'nvidia-nccl-cu{cuda_version}{nvidia_nccl_version}',
+        f'nvidia-nvjitlink{cuda_wheel_suffix}{nvidia_nvjitlink_version}',
     ],
     'gcs-filesystem': [
         ('tensorflow-io-gcs-filesystem>=0.23.1; '
@@ -309,24 +319,8 @@ matches = []
 for path in so_lib_paths:
   matches.extend(['../' + x for x in find_files('*', path) if '.py' not in x])
 
-# If building a tpu package, LibTPU for Cloud TPU VM can be installed via:
-# $ pip install <tf-tpu project> -f \
-#  https://storage.googleapis.com/libtpu-releases/index.html
-# libtpu is built and uploaded to this link every night (PST).
 if '_tpu' in project_name:
-  # For tensorflow-tpu releases, use a set libtpu version;
-  # For tf-nightly-tpu, use the most recent libtpu-nightly. Because of the
-  # timing of these tests, the UTC date from eight hours ago is expected to be a
-  # valid version.
-  _libtpu_version = standard_or_nightly(
-      LATEST_RELEASE_LIBTPU_VERSION,
-      NEXT_LIBTPU_VERSION + '.dev'
-      + (
-          datetime.datetime.now(tz=datetime.timezone.utc)
-          - datetime.timedelta(hours=8)
-      ).strftime('%Y%m%d') + '+nightly',
-  )
-  REQUIRED_PACKAGES.append([f'libtpu=={_libtpu_version}'])
+  REQUIRED_PACKAGES.append([f'libtpu~=0.0.14'])
   CONSOLE_SCRIPTS.extend([
       'start_grpc_tpu_worker = tensorflow.python.tools.grpc_tpu_worker:run',
       ('start_grpc_tpu_service = '
@@ -430,6 +424,7 @@ setup(
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3 :: Only',
         'Topic :: Scientific/Engineering',
         'Topic :: Scientific/Engineering :: Mathematics',

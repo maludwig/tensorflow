@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/service/while_loop_expensive_invariant_code_motion.h"
 
+#include <cstdint>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -23,6 +24,10 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/hlo/analysis/while_loop_analysis.h"
 #include "xla/service/while_util.h"
 #include "xla/shape_util.h"
@@ -340,8 +345,8 @@ absl::StatusOr<bool> WhileLoopExpensiveInvariantCodeMotion::
 absl::StatusOr<bool> WhileLoopExpensiveInvariantCodeMotion::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
-  VLOG(2) << "HLO module before WhileLoopExpensiveInvariantCodeMotion:";
-  XLA_VLOG_LINES(2, module->ToString());
+  VLOG(3) << "HLO module before WhileLoopExpensiveInvariantCodeMotion:";
+  XLA_VLOG_LINES(3, module->ToString());
 
   bool changed = false;
   std::vector<HloInstruction*> while_instrs;
@@ -350,6 +355,11 @@ absl::StatusOr<bool> WhileLoopExpensiveInvariantCodeMotion::Run(
                     HloPredicateIsOp<HloOpcode::kWhile>);
   }
 
+  // Currently, if a loop body that is used by multiple while
+  // ops contains an op that can be hoisted, we will make a new computation for
+  // each of the while ops, instead of using one shared new computation. This is
+  // probably fine, but we may want to improve it in the future if we decide to
+  // double-down on shared while bodies.
   for (HloInstruction* while_instr : while_instrs) {
     // Right now we only hoist computations from the while body, but
     // TryHoistingInvariantInstructionsFromWhileBody can be generalized to
@@ -363,6 +373,17 @@ absl::StatusOr<bool> WhileLoopExpensiveInvariantCodeMotion::Run(
     // * We delete while loops that have a zero trip count, so this would have
     //   to be a while loop with a somewhat opaque condition expression.
 
+    if (while_instr->frontend_attributes().map().contains(
+            "_xla_disable_loop_instr_hoisting")) {
+      // If this frontend attr is present, we have knowledge from the framework
+      // to disable hoisting from this loop.
+      auto print_no_metadata = HloPrintOptions{}.set_print_metadata(false);
+      std::string while_instr_name = while_instr->ToString(print_no_metadata);
+      VLOG(2) << "Skipping hoisting from: " << while_instr_name
+              << " because it is disabled via xla metadata.";
+      continue;
+    }
+
     TF_ASSIGN_OR_RETURN(
         bool result,
         TryHoistingInvariantInstructionsFromWhileBody(while_instr));
@@ -370,10 +391,10 @@ absl::StatusOr<bool> WhileLoopExpensiveInvariantCodeMotion::Run(
   }
 
   if (changed) {
-    VLOG(2) << "HLO module after WhileLoopExpensiveInvariantCodeMotion:";
-    XLA_VLOG_LINES(2, module->ToString());
+    VLOG(3) << "HLO module after WhileLoopExpensiveInvariantCodeMotion:";
+    XLA_VLOG_LINES(3, module->ToString());
   } else {
-    VLOG(2)
+    VLOG(3)
         << "HLO module unchanged after WhileLoopExpensiveInvariantCodeMotion";
   }
 

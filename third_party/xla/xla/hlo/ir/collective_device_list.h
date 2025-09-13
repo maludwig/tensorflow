@@ -16,15 +16,18 @@ limitations under the License.
 #ifndef XLA_HLO_IR_COLLECTIVE_DEVICE_LIST_H_
 #define XLA_HLO_IR_COLLECTIVE_DEVICE_LIST_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/types/span.h"
 #include "xla/array.h"
 #include "xla/hlo/ir/tile_assignment.h"
+#include "xla/printer.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/protobuf.h"
@@ -57,6 +60,20 @@ class IotaReplicaGroupList {
         num_replica_groups_(num_replica_groups),
         num_devices_per_group_(num_devices_per_group) {}
 
+  bool operator==(const IotaReplicaGroupList& other) const {
+    return num_replica_groups() == other.num_replica_groups() &&
+           num_devices_per_group() == other.num_devices_per_group() &&
+           reshape_dims() == other.reshape_dims() &&
+           transpose_perm() == other.transpose_perm();
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const IotaReplicaGroupList& c) {
+    return H::combine(std::move(h), c.num_replica_groups_,
+                      c.num_devices_per_group_, c.reshape_dims(),
+                      c.transpose_perm());
+  }
+
   int64_t num_replica_groups() const;
   int64_t num_devices_per_group() const;
   absl::Span<const int64_t> reshape_dims() const {
@@ -66,6 +83,9 @@ class IotaReplicaGroupList {
     return iota_tile_assignment_.transpose_perm();
   }
   Array<int64_t> ToArray() const { return iota_tile_assignment_.ToArray(); }
+  std::vector<std::vector<int64_t>> flattened_replica_groups() const;
+
+  void Print(Printer* printer) const;
 
   std::string ToString() const;
 
@@ -87,6 +107,10 @@ class CollectiveDeviceList {
   explicit CollectiveDeviceList()
       : replica_groups_(std::make_shared<std::vector<ReplicaGroup>>()) {};
 
+  explicit CollectiveDeviceList(std::vector<ReplicaGroup> replica_groups)
+      : replica_groups_(std::make_shared<std::vector<ReplicaGroup>>(
+            std::move(replica_groups))) {};
+
   explicit CollectiveDeviceList(absl::Span<const ReplicaGroup> replica_groups)
       : replica_groups_(std::make_shared<std::vector<ReplicaGroup>>(
             replica_groups.begin(), replica_groups.end())) {};
@@ -100,11 +124,57 @@ class CollectiveDeviceList {
       const IotaReplicaGroupList& iota_replica_group_list)
       : iota_replica_group_list_(iota_replica_group_list) {}
 
+  bool operator==(const CollectiveDeviceList& other) const {
+    if (iota_replica_group_list_.has_value() &&
+        other.iota_replica_group_list_.has_value()) {
+      return *iota_replica_group_list_ == *other.iota_replica_group_list_;
+    }
+    const auto& this_groups = replica_groups();
+    const auto& other_groups = other.replica_groups();
+    if (this_groups.size() != other_groups.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < this_groups.size(); ++i) {
+      if (!tsl::protobuf::util::MessageDifferencer::Equals(this_groups[i],
+                                                           other_groups[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const CollectiveDeviceList& c) {
+    const auto& groups = c.replica_groups();
+    h = H::combine(std::move(h), groups.size());
+    for (const auto& group : groups) {
+      h = H::combine_contiguous(std::move(h), group.replica_ids().data(),
+                                group.replica_ids().size());
+    }
+    return h;
+  }
+
   // Lazyly explands iota if applicable.
   const std::vector<ReplicaGroup>& replica_groups() const;
   const std::optional<IotaReplicaGroupList>& iota_replica_group_list() const {
     return iota_replica_group_list_;
   }
+
+  int64_t num_replica_groups() const {
+    return iota_replica_group_list_.has_value()
+               ? iota_replica_group_list_->num_replica_groups()
+               : replica_groups_->size();
+  }
+
+  int64_t num_devices_per_group() const {
+    return iota_replica_group_list_.has_value()
+               ? iota_replica_group_list_->num_devices_per_group()
+               : replica_groups_->begin()->replica_ids_size();
+  }
+
+  void Print(Printer* printer,
+             bool print_full_replica_group_list = false) const;
+
   std::string ToString(bool print_full_replica_group_list = false) const;
 
   CollectiveDeviceListProto ToProto() const;

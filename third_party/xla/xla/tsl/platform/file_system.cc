@@ -95,12 +95,6 @@ absl::Status FileSystem::HasAtomicMove(const string& path,
   return absl::OkStatus();
 }
 
-absl::Status FileSystem::CanCreateTempFile(const std::string& fname,
-                                           bool* can_create_temp_file) {
-  *can_create_temp_file = true;
-  return absl::OkStatus();
-}
-
 void FileSystem::FlushCaches(TransactionToken* token) {}
 
 bool FileSystem::FilesExist(const std::vector<string>& files,
@@ -260,15 +254,15 @@ string FileSystem::JoinPathImpl(
 
     if (result[result.size() - 1] == '/') {
       if (this->IsAbsolutePath(path)) {
-        strings::StrAppend(&result, path.substr(1));
+        absl::StrAppend(&result, path.substr(1));
       } else {
-        strings::StrAppend(&result, path);
+        absl::StrAppend(&result, path);
       }
     } else {
       if (this->IsAbsolutePath(path)) {
-        strings::StrAppend(&result, path);
+        absl::StrAppend(&result, path);
       } else {
-        strings::StrAppend(&result, "/", path);
+        absl::StrAppend(&result, "/", path);
       }
     }
   }
@@ -491,7 +485,7 @@ string FileSystem::CreateURI(absl::string_view scheme, absl::string_view host,
   if (scheme.empty()) {
     return string(path);
   }
-  return strings::StrCat(scheme, "://", host, path);
+  return absl::StrCat(scheme, "://", host, path);
 }
 
 std::string FileSystem::DecodeTransaction(const TransactionToken* token) {

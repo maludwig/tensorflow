@@ -1,6 +1,8 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:tensorflow.bzl", "if_google", "if_not_windows", "if_oss", "tf_cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load("//tensorflow/lite:build_def.bzl", "tflite_cc_shared_object", "tflite_copts", "tflite_copts_warnings", "tflite_linkopts_no_undefined", "tflite_self_contained_libs_test_suite")
@@ -50,21 +52,21 @@ config_setting(
     },
 )
 
-# Without "cpu":"k8", when building with --copt=-DTF_LITE_STATIC_MEMORY, we get
-# the following error:
+# Without @platforms//cpu:x86_64, when building with
+# --copt=-DTF_LITE_STATIC_MEMORY, we get the following error:
 # Multiple matches are not allowed unless one is unambiguously more specialized.
 #
 # The reason for this is that some of the tflite BUILD files (e.g.
-# kernels/internal/BUILD) have config_settings based on "cpu":"k8" and the
+# kernels/internal/BUILD) have config_settings based on @platforms//cpu:x86_64 and the
 # tf_lite_static_memory config_setting needs to be more specialized. It may be
 # possible to change the existing config_settings to allow for
-# tf_lite_static_memory to not require "cpu":"k8". We are not attempting that
+# tf_lite_static_memory to not require @platforms//cpu:x86_64. We are not attempting that
 # since we currently only using the BUILD files for x86.
 config_setting(
     name = "tf_lite_static_memory",
+    constraint_values = ["@platforms//cpu:x86_64"],
     values = {
         "copt": "-DTF_LITE_STATIC_MEMORY",
-        "cpu": "k8",
     },
 )
 
@@ -79,7 +81,7 @@ bool_flag(
 config_setting(
     name = "fuchsia_mmap_disabled",
     constraint_values = if_google(
-        ["//third_party/bazel_platforms/os:fuchsia"],
+        ["@platforms//os:fuchsia"],
         [],
     ),
     flag_values = {

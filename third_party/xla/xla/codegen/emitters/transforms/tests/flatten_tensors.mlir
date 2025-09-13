@@ -242,8 +242,26 @@ func.func @vector_extract(%arg0: vector<2x3xf32>, %arg1: index) -> f32 {
 
 // -----
 
+func.func @vector_transfer_read(%arg0: tensor<64x66xbf16>, %i: index, %j: index)
+    -> vector<2xbf16> {
+  %cst = arith.constant 0.0 : bf16
+  %v = vector.transfer_read %arg0[%i, %j], %cst {in_bounds = [true]}
+    : tensor<64x66xbf16>, vector<2xbf16>
+  func.return %v : vector<2xbf16>
+}
+// CHECK: #[[$MAP:.+]] = #xla.indexing_map<"(d0, d1) -> (d0 * 66 + d1)
+// CHECK-SAME: domain: d0 in [0, 63], d1 in [0, 65]
+
+// CHECK-LABEL: func.func @vector_transfer_read(
+// CHECK-SAME:      %[[SRC:.*]]: tensor<4224xbf16>,
+// CHECK-SAME:      %[[I:.*]]: index, %[[J:.*]]: index)
+// CHECK:        %[[INDEX:.*]] = xla.apply_indexing #[[$MAP]](%[[I]], %[[J]])
+// CHECK:        vector.transfer_read %[[SRC]][%[[INDEX]]]
+
+// -----
+
 func.func @vector_insert(%arg0: vector<10x24xf32>, %i: index)
-  -> vector<10x24xf32> {
+    -> vector<10x24xf32> {
   %scalar = arith.constant 3.0 : f32
   %out = vector.insert %scalar, %arg0 [1, %i] : f32 into vector<10x24xf32>
   func.return %out : vector<10x24xf32>
@@ -256,6 +274,22 @@ func.func @vector_insert(%arg0: vector<10x24xf32>, %i: index)
 // CHECK:         %[[INDEX:.*]] = xla.apply_indexing #[[$MAP]](%[[I]])
 // CHECK:         vector.insert {{.*}}, %[[VECTOR]] [%[[INDEX]]]
 // CHECK-SAME:      : f32 into vector<240xf32>
+
+// -----
+
+func.func @vector_from_elements(%arg0: vector<2x2xf32>, %a: f32)
+    -> vector<2x2xf32> {
+  %b = arith.constant 2.0 : f32
+  %c = arith.constant 3.0 : f32
+  %d = arith.constant 4.0 : f32
+  %out = vector.from_elements %a, %b, %c, %d : vector<2x2xf32>
+  func.return %out : vector<2x2xf32>
+}
+// CHECK-LABEL: func.func @vector_from_elements(
+// CHECK-SAME:      %[[VECTOR:.*]]: vector<4xf32>, %[[A:.*]]: f32)
+// CHECK-SAME:      -> vector<4xf32> {
+// CHECK:         vector.from_elements %[[A]],
+// CHECK-SAME:      : vector<4xf32>
 
 // -----
 

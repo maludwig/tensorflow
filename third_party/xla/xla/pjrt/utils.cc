@@ -27,11 +27,13 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/numbers.h"
-#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
@@ -85,7 +87,7 @@ absl::StatusOr<Shape> GetShardedShape(const Shape& shape,
 }
 
 absl::StatusOr<Shape> GetShardedShape(const HloInstructionProto& instr) {
-  const Shape unsharded_shape(instr.shape());
+  TF_ASSIGN_OR_RETURN(Shape unsharded_shape, Shape::FromProto(instr.shape()));
   Shape sharded_shape;
   if (instr.has_sharding()) {
     TF_ASSIGN_OR_RETURN(sharded_shape,
@@ -117,7 +119,8 @@ absl::StatusOr<std::pair<std::vector<Shape>, Shape>> GetShardedProgramShapes(
         TF_ASSIGN_OR_RETURN(arg_shapes[instr.parameter_number()],
                             GetShardedShape(instr));
       }
-      if (instr.id() == comp.root_id()) {
+      if (HloInstruction::CalculateLocalId(instr.id()) ==
+          HloInstruction::CalculateLocalId(comp.root_id())) {
         if (result_shape.element_type() != PRIMITIVE_TYPE_INVALID) {
           return InvalidArgument("Found multiple root instructions");
         }
@@ -444,7 +447,7 @@ absl::StatusOr<std::vector<LayoutMode>> GetArgLayoutModes(
                       computation.GetProgramShape());
   size_t num_args = program_shape.parameters_size() == 1 &&
                             program_shape.parameters(0).IsTuple()
-                        ? program_shape.parameters(0).tuple_shapes_size()
+                        ? program_shape.parameters(0).tuple_shapes().size()
                         : program_shape.parameters_size();
   return GetLayoutModes(computation, "arg_layout_modes", num_args);
 }
@@ -455,7 +458,7 @@ absl::StatusOr<std::vector<MemorySpaceColor>> GetArgMemoryKinds(
                       computation.GetProgramShape());
   size_t num_args = program_shape.parameters_size() == 1 &&
                             program_shape.parameters(0).IsTuple()
-                        ? program_shape.parameters(0).tuple_shapes_size()
+                        ? program_shape.parameters(0).tuple_shapes().size()
                         : program_shape.parameters_size();
   return GetMemoryKinds(computation, "arg_memory_spaces", num_args);
 }
@@ -465,7 +468,7 @@ absl::StatusOr<std::vector<LayoutMode>> GetOutputLayoutModes(
   TF_ASSIGN_OR_RETURN(ProgramShape program_shape,
                       computation.GetProgramShape());
   size_t num_outputs = program_shape.result().IsTuple()
-                           ? program_shape.result().tuple_shapes_size()
+                           ? program_shape.result().tuple_shapes().size()
                            : 1;
   return GetLayoutModes(computation, "out_layout_modes", num_outputs);
 }
@@ -475,7 +478,7 @@ absl::StatusOr<std::vector<MemorySpaceColor>> GetOutputMemoryKinds(
   TF_ASSIGN_OR_RETURN(ProgramShape program_shape,
                       computation.GetProgramShape());
   size_t num_outputs = program_shape.result().IsTuple()
-                           ? program_shape.result().tuple_shapes_size()
+                           ? program_shape.result().tuple_shapes().size()
                            : 1;
   return GetMemoryKinds(computation, "out_memory_spaces", num_outputs);
 }
@@ -763,7 +766,7 @@ absl::StatusOr<std::vector<int>> ComputeParametersThatMustBeDonated(
       const Shape& input_tuple_shape =
           computation->parameter_instruction(0)->shape();
       CHECK(input_tuple_shape.IsTuple());
-      return input_tuple_shape.tuple_shapes_size();
+      return input_tuple_shape.tuple_shapes().size();
     } else {
       return computation->num_parameters();
     }

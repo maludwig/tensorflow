@@ -16,6 +16,7 @@ limitations under the License.
 #include "xla/hlo/transforms/expanders/bitcast_dtypes_expander.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,14 +31,14 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_original_value.h"
 #include "xla/primitive_util.h"
+#include "xla/service/call_inliner.h"
 #include "xla/service/hlo_creation_utils.h"
-#include "xla/service/hlo_module_config.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 
@@ -86,7 +87,7 @@ absl::StatusOr<HloInstruction*> BitcastDtypesExpander::ExpandInstruction(
                                       broadcasted_input_shape));
       input = BitcastConvertType(input, input_logical_type);
       TF_ASSIGN_OR_RETURN(Shape input_shape, b.GetShape(input));
-      XlaOp iota = Iota(&b, input_shape, input_shape.rank() - 1);
+      XlaOp iota = Iota(&b, input_shape, input_shape.dimensions().size() - 1);
       XlaOp iota_m = Mul(ScalarLike(input, output_bit_width), iota);
       input = And(ShiftRightLogical(input, iota_m),
                   ScalarLike(input, output_bit_width_mask));
@@ -100,11 +101,11 @@ absl::StatusOr<HloInstruction*> BitcastDtypesExpander::ExpandInstruction(
           ConstantR0WithType(&b, output_logical_type, input_bit_width),
           Iota(&b,
                ShapeUtil::ChangeElementType(from_shape, output_logical_type),
-               from_shape.rank() - 1));
+               from_shape.dimensions().size() - 1));
       input = ShiftLeft(input, iota_m);
       input = Reduce(input, Zero(&b, output_logical_type),
                      CreateScalarOrComputation(output_logical_type, &b),
-                     {from_shape.rank() - 1});
+                     {from_shape.dimensions_size() - 1});
     }
 
     BitcastConvertType(input, to_shape.element_type());
@@ -114,8 +115,19 @@ absl::StatusOr<HloInstruction*> BitcastDtypesExpander::ExpandInstruction(
         computation, XlaComputationToHloComputation(xla_computation, module));
   }
 
-  return instruction->parent()->AddInstruction(HloInstruction::CreateCall(
-      instruction->shape(), instruction->operands(), computation));
+  HloInstruction* call =
+      instruction->parent()->AddInstruction(HloInstruction::CreateCall(
+          instruction->shape(), instruction->operands(), computation));
+  call->set_original_value(
+      std::make_shared<OriginalValue>(OriginalValue::SyntheticCall()));
+  HloInstruction* root = call->to_apply()->root_instruction();
+  // TODO(b/260601110): In theory, we shouldn't need to do it, but in practice
+  // this creates reshape/broadcast patterns that can be pretty bad if not
+  // inlined. Since each function only has a single call-site anyway, this isn't
+  // a big deal.
+  CallInliner call_inliner;
+  TF_ASSIGN_OR_RETURN(auto inline_map, call_inliner.Inline(call));
+  return inline_map[root];
 }
 
 bool BitcastDtypesExpander::InstructionMatchesPattern(

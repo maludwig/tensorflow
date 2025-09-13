@@ -26,6 +26,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
@@ -36,20 +38,21 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_original_value.h"
 #include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/pattern_matcher_gmock.h"
+#include "xla/hlo/testlib/test.h"
+#include "xla/hlo/testlib/test_helpers.h"
 #include "xla/layout_util.h"
 #include "xla/literal_util.h"
-#include "xla/protobuf_util.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/service/pattern_matcher.h"
-#include "xla/service/pattern_matcher_gmock.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/test.h"
-#include "xla/test_helpers.h"
-#include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/util/proto/proto_matchers.h"
 #include "xla/util.h"
 #include "xla/window_util.h"
 #include "xla/xla_data.pb.h"
@@ -57,15 +60,15 @@ limitations under the License.
 #include "tsl/platform/statusor.h"
 
 namespace xla {
-
 namespace {
 
 namespace m = ::xla::match;
 
 using ::testing::ElementsAre;
 using ::testing::UnorderedElementsAre;
+using ::tsl::proto_testing::EqualsProto;
 
-class HloInstructionTest : public HloTestBase {
+class HloInstructionTest : public HloHardwareIndependentTestBase {
  protected:
   Shape r0f32_ = ShapeUtil::MakeShape(F32, {});
 };
@@ -765,15 +768,15 @@ TEST_F(HloInstructionTest, PreserveMetadataInFusionAndClone) {
   auto* fusion = computation->CreateFusionInstruction(
       {exp2, exp1}, HloInstruction::FusionKind::kLoop);
 
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(metadata, fusion->metadata()));
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(
-      metadata, fusion->fused_expression_root()->metadata()));
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(
-      metadata, fusion->fused_expression_root()->operand(0)->metadata()));
+  EXPECT_THAT(fusion->metadata(), EqualsProto(metadata));
+  EXPECT_THAT(fusion->fused_expression_root()->metadata(),
+              EqualsProto(metadata));
+  EXPECT_THAT(fusion->fused_expression_root()->operand(0)->metadata(),
+              EqualsProto(metadata));
 
   std::string new_name = "foobarfoo";
   auto cloned = fusion->CloneWithNewOperands(fusion->shape(), {}, new_name);
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(metadata, fusion->metadata()));
+  EXPECT_THAT(fusion->metadata(), EqualsProto(metadata));
 
   size_t index = cloned->name().rfind(new_name);
   EXPECT_TRUE(index != std::string::npos);
@@ -862,7 +865,7 @@ TEST_F(HloInstructionTest, AsyncOp) {
           add, {ShapeUtil::MakeScalarShape(U32)}, "parallel_thread"));
   auto* async_start = async_done->operand(0);
 
-  EXPECT_EQ(async_start->shape().tuple_shapes_size(), 3);
+  EXPECT_EQ(async_start->shape().tuple_shapes().size(), 3);
   EXPECT_EQ(async_start->async_execution_thread(), "parallel_thread");
   EXPECT_EQ(async_done->async_execution_thread(), "parallel_thread");
   EXPECT_TRUE(ShapeUtil::Equal(async_start->shape().tuple_shapes(2),
@@ -919,7 +922,7 @@ TEST_F(HloInstructionTest, AsyncOpWithDeps) {
   EXPECT_EQ(async_done->control_successors().size(), 1);
   EXPECT_EQ(async_done->control_successors()[0], add2);
 
-  EXPECT_EQ(async_start->shape().tuple_shapes_size(), 3);
+  EXPECT_EQ(async_start->shape().tuple_shapes().size(), 3);
   EXPECT_EQ(async_start->async_execution_thread(), "parallel_thread");
   EXPECT_EQ(async_done->async_execution_thread(), "parallel_thread");
   EXPECT_TRUE(ShapeUtil::Equal(async_start->shape().tuple_shapes(2),
@@ -1240,6 +1243,38 @@ ENTRY entry (param: f32[]) -> (f32[], f32[], f32[]) {
 
   EXPECT_TRUE(StructuralEqual(*t1, *t2));
   EXPECT_FALSE(StructuralEqual(*t1, *t3));
+}
+
+TEST_F(HloInstructionTest, IdenticalSendInstructions) {
+  auto param_0 = HloInstruction::CreateParameter(
+      0, ShapeUtil::MakeShape(F32, {}), "param_0");
+  auto param_1 = HloInstruction::CreateParameter(
+      1, ShapeUtil::MakeShape(F32, {}), "param_1");
+  auto token_0 = HloInstruction::CreateToken();
+  auto token_1 = HloInstruction::CreateToken();
+
+  auto send_0 = HloInstruction::CreateSend(param_0.get(), token_0.get(),
+                                           /*channel_id=*/42,
+                                           /*is_host_transfer=*/true);
+  auto send_1 = HloInstruction::CreateSend(param_1.get(), token_1.get(),
+                                           /*channel_id=*/42,
+                                           /*is_host_transfer=*/true);
+  auto send_2 = HloInstruction::CreateSend(param_1.get(), token_1.get(),
+                                           /*channel_id=*/42,
+                                           /*is_host_transfer=*/false);
+  auto send_3 = HloInstruction::CreateSend(param_1.get(), token_1.get(),
+                                           /*channel_id=*/43,
+                                           /*is_host_transfer=*/true);
+  auto eq_operand_shapes = [](const HloInstruction* a,
+                              const HloInstruction* b) {
+    return ShapeUtil::Equal(a->shape(), b->shape());
+  };
+  EXPECT_TRUE(send_0->Identical(*send_1, eq_operand_shapes));
+  EXPECT_FALSE(send_0->Identical(*send_2, eq_operand_shapes));
+  EXPECT_FALSE(send_0->Identical(*send_3, eq_operand_shapes));
+
+  send_1->set_frontend_attribute("foo", "bar");
+  EXPECT_FALSE(send_0->Identical(*send_1, eq_operand_shapes));
 }
 
 TEST_F(HloInstructionTest, FunctionVisitor) {
@@ -1684,35 +1719,6 @@ TEST_F(HloInstructionTest, StringifyDot) {
             "lhs_contracting_dims={1}, rhs_contracting_dims={0}");
 }
 
-TEST_F(HloInstructionTest, StringifySparseDot) {
-  HloComputation::Builder builder("SparseDot");
-  HloInstruction* x = builder.AddInstruction(HloInstruction::CreateParameter(
-      0, ShapeUtil::MakeShape(F32, {5, 16}), "x"));
-  HloInstruction* y = builder.AddInstruction(HloInstruction::CreateParameter(
-      1, ShapeUtil::MakeShape(F32, {32, 20}), "y"));
-  HloInstruction* meta = builder.AddInstruction(HloInstruction::CreateParameter(
-      1, ShapeUtil::MakeShape(U16, {5, 2}), "meta"));
-
-  DotDimensionNumbers dot_dnums;
-  dot_dnums.add_lhs_contracting_dimensions(1);
-  dot_dnums.add_rhs_contracting_dimensions(0);
-  SparsityDescriptor sparsity_descriptor;
-  sparsity_descriptor.set_type(SparsityType::SPARSITY_STRUCTURED_N_M);
-  sparsity_descriptor.set_n(2);
-  sparsity_descriptor.set_m(4);
-  sparsity_descriptor.set_index(0);
-  sparsity_descriptor.set_dimension(1);
-  std::vector<HloInstruction*> meta_operands = {meta};
-  HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateDot(
-      ShapeUtil::MakeShape(F32, {5, 20}), x, y, dot_dnums,
-      DefaultPrecisionConfig(2), {sparsity_descriptor}, meta_operands));
-
-  EXPECT_EQ(
-      dot->ToString(),
-      "%dot = f32[5,20]{1,0} dot(%x, %y, %meta), lhs_contracting_dims={1}, "
-      "rhs_contracting_dims={0}, sparsity=L.1@2:4");
-}
-
 TEST_F(HloInstructionTest, StringifyConditional) {
   const Shape s1 = ShapeUtil::MakeShape(F32, {5, 10});
   const Shape s2 = ShapeUtil::MakeShape(F32, {20, 10});
@@ -1799,16 +1805,14 @@ TEST_F(HloInstructionTest, GetSetStatisticsViz) {
   x->set_stat_index_to_visualize(0);
 
   EXPECT_TRUE(x->has_statistics());
-  EXPECT_TRUE(
-      protobuf_util::ProtobufEquals(x->statistic_to_visualize(), statistic));
+  EXPECT_THAT(x->statistic_to_visualize(), EqualsProto(statistic));
 
   statistic.set_stat_val(40.0);
   *statistics_viz.add_statistics() = statistic;
 
   x->set_statistics_viz(statistics_viz);
 
-  EXPECT_TRUE(
-      protobuf_util::ProtobufEquals(x->statistics_viz(), statistics_viz));
+  EXPECT_THAT(x->statistics_viz(), EqualsProto(statistics_viz));
 }
 
 TEST_F(HloInstructionTest, StringifyStatisticsViz) {
@@ -2168,10 +2172,10 @@ TEST_F(HloInstructionTest, CanonicalStringificationFusion) {
   computation->SetExecutionThread(kParallelThreadName);
   HloInstruction* fusion = computation->CreateFusionInstruction(
       {dot, reshape}, HloInstruction::FusionKind::kLoop);
-  fusion->set_called_computations_execution_thread(
-      kParallelThreadName,
-      /*skip_async_execution_thread_overwrite*/ false);
+  fusion->set_called_computations_execution_thread(kParallelThreadName);
 
+  // Fusion is embedded call context, so the execution thread is not printed.
+  // here.
   const std::string expected_fusion =
       R"(f32[5,20]{1,0} fusion(f32[5,10]{1,0}, f32[20,10]{1,0}), kind=kLoop, calls=
 {
@@ -2179,7 +2183,7 @@ TEST_F(HloInstructionTest, CanonicalStringificationFusion) {
   tmp_1 = f32[20,10]{1,0} parameter(1)
   tmp_2 = f32[10,20]{1,0} transpose(f32[20,10]{1,0} tmp_1), dimensions={1,0}
   ROOT tmp_3 = f32[5,20]{1,0} dot(f32[5,10]{1,0} tmp_0, f32[10,20]{1,0} tmp_2), lhs_contracting_dims={1}, rhs_contracting_dims={0}
-}, execution_thread="parallel_thread")";
+})";
   EXPECT_EQ(fusion->ToString(options), expected_fusion);
 }
 
@@ -2404,8 +2408,7 @@ TEST_F(HloInstructionTest, CloneWindowOnCustomCall) {
   Window w = window_util::MakeWindow({1, 2, 3});
   instr->set_window(w);
   auto clone = instr->Clone();
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(clone->window(), w))
-      << clone->window().DebugString();
+  EXPECT_THAT(clone->window(), EqualsProto(w));
 }
 
 TEST_F(HloInstructionTest, CloneDnumsOnCustomCall) {
@@ -2416,9 +2419,7 @@ TEST_F(HloInstructionTest, CloneDnumsOnCustomCall) {
   dnums.set_output_batch_dimension(42);
   instr->set_convolution_dimension_numbers(dnums);
   auto clone = instr->Clone();
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(
-      clone->convolution_dimension_numbers(), dnums))
-      << clone->convolution_dimension_numbers().DebugString();
+  EXPECT_THAT(clone->convolution_dimension_numbers(), EqualsProto(dnums));
 }
 
 TEST_F(HloInstructionTest, CloneHasSideEffectOnCustomCall) {
@@ -2458,9 +2459,8 @@ TEST_F(HloInstructionTest, PreserveOperandPrecisionOnCloneConv) {
   auto* conv = module->entry_computation()->root_instruction();
 
   auto clone = conv->Clone();
-  EXPECT_THAT(
-      clone->precision_config().operand_precision(),
-      ::testing::ElementsAre(PrecisionConfig::HIGH, PrecisionConfig::DEFAULT));
+  EXPECT_THAT(clone->precision_config().operand_precision(),
+              ElementsAre(PrecisionConfig::HIGH, PrecisionConfig::DEFAULT));
 }
 
 TEST_F(HloInstructionTest, ReuseReshapeOfFusionParameter) {
@@ -2597,9 +2597,8 @@ TEST_F(HloInstructionTest, VerifyToApplyRegionPointsToReduceScatter) {
   // the reduce-scatter instruction.
   for (HloComputation* comp : module->MakeComputationPostOrder()) {
     if (!comp->IsEntryComputation()) {
-      EXPECT_TRUE(comp->IsCollectiveCalledComputation());
-      EXPECT_EQ(comp->CollectiveCallInstruction(),
-                module->entry_computation()->root_instruction());
+      EXPECT_THAT(comp->caller_instructions(),
+                  ElementsAre(module->entry_computation()->root_instruction()));
     }
   }
 }
@@ -2635,9 +2634,8 @@ TEST_F(HloInstructionTest, VerifyToApplyRegionPointsToAllReduce) {
   // the all-reduce instruction.
   for (HloComputation* comp : module->MakeComputationPostOrder()) {
     if (!comp->IsEntryComputation()) {
-      EXPECT_TRUE(comp->IsCollectiveCalledComputation());
-      EXPECT_EQ(comp->CollectiveCallInstruction(),
-                module->entry_computation()->root_instruction());
+      EXPECT_THAT(comp->caller_instructions(),
+                  ElementsAre(module->entry_computation()->root_instruction()));
     }
   }
 }
@@ -2712,25 +2710,17 @@ TEST_F(HloInstructionTest, VerifyBodyComputationPointsToWhile) {
   module->AddEntryComputation(main_builder.Build());
   // Should find one while body computation in the graph and it should point to
   // the while instruction.
-  int num_while_body_comp = 0;
-  for (HloComputation* comp : module->MakeComputationPostOrder()) {
-    if (comp->IsWhileBodyComputation()) {
-      num_while_body_comp += 1;
-      EXPECT_EQ(comp->WhileCallInstruction(),
-                module->entry_computation()->root_instruction());
-    }
-  }
-  EXPECT_EQ(num_while_body_comp, 1);
-
+  int num_whiles = 0;
   for (HloInstruction* instruction :
        module->entry_computation()->instructions()) {
     if (instruction->opcode() == HloOpcode::kWhile) {
+      ++num_whiles;
       HloComputation* while_body = instruction->while_body();
-      EXPECT_TRUE(while_body->IsWhileBodyComputation());
-      HloInstruction* while_back_ref = while_body->WhileCallInstruction();
-      EXPECT_EQ(while_back_ref->while_body(), while_body);
+      EXPECT_EQ(while_body->GetUniqueCaller(HloOpcode::kWhile).value(),
+                instruction);
     }
   }
+  EXPECT_EQ(num_whiles, 1);
 }
 
 TEST_F(HloInstructionTest,
@@ -2780,10 +2770,12 @@ TEST_F(HloInstructionTest,
   // point to the conditional instruction.
   int num_conditional_branch_comp = 0;
   for (HloComputation* comp : module->MakeComputationPostOrder()) {
-    if (comp->IsConditionalBranchComputation()) {
+    auto conditional_callers =
+        comp->caller_instructions(HloOpcode::kConditional);
+    if (!conditional_callers.empty()) {
       num_conditional_branch_comp += 1;
-      EXPECT_EQ(comp->ConditionalCallInstruction(),
-                module->entry_computation()->root_instruction());
+      EXPECT_THAT(conditional_callers,
+                  ElementsAre(module->entry_computation()->root_instruction()));
     }
   }
   EXPECT_EQ(num_conditional_branch_comp, 2);
@@ -2855,10 +2847,12 @@ TEST_F(HloInstructionTest,
   // point to the conditional instruction.
   int num_conditional_branch_comp = 0;
   for (HloComputation* comp : module->MakeComputationPostOrder()) {
-    if (comp->IsConditionalBranchComputation()) {
+    auto conditional_callers =
+        comp->caller_instructions(HloOpcode::kConditional);
+    if (!conditional_callers.empty()) {
       num_conditional_branch_comp += 1;
-      EXPECT_EQ(comp->ConditionalCallInstruction(),
-                module->entry_computation()->root_instruction());
+      EXPECT_THAT(conditional_callers,
+                  ElementsAre(module->entry_computation()->root_instruction()));
     }
   }
   EXPECT_EQ(num_conditional_branch_comp, branch_computations.size());
@@ -3216,8 +3210,7 @@ TEST_F(HloInstructionTest, ValidResultAccuracy) {
   // exp->set_result_accuracy(result_accuracy_proto);
   auto module = CreateNewVerifiedModule();
   module->AddEntryComputation(builder.Build());
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(result_accuracy_proto,
-                                            exp->result_accuracy()));
+  EXPECT_THAT(exp->result_accuracy(), EqualsProto(result_accuracy_proto));
 
   // mode: HIGHEST
   EXPECT_TRUE(tsl::protobuf::TextFormat::ParseFromString(
@@ -3227,8 +3220,7 @@ TEST_F(HloInstructionTest, ValidResultAccuracy) {
       &result_accuracy_proto));
   exp = builder.AddInstruction(HloInstruction::CreateUnary(
       r0f32_, HloOpcode::kExp, foo, result_accuracy_proto));
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(result_accuracy_proto,
-                                            exp->result_accuracy()));
+  EXPECT_THAT(exp->result_accuracy(), EqualsProto(result_accuracy_proto));
 }
 
 TEST_F(HloInstructionTest, InvalidResultAccuracy) {
@@ -3265,7 +3257,7 @@ TEST_F(HloInstructionTest, CreateFromProtoExp) {
       HloInstruction::CreateFromProto(
           proto_valid,
           {{0, HloInstruction::CreateParameter(0, r0f32_, "foo").get()}}));
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(hlo->result_accuracy(), r));
+  EXPECT_THAT(hlo->result_accuracy(), EqualsProto(r));
   HloInstructionProto proto_invalid;
   proto_invalid.set_opcode("exponential");
   proto_invalid.set_name("exp");
@@ -3325,8 +3317,7 @@ TEST_F(HloInstructionTest, CreateUnaryWithResultAccuracy) {
   std::unique_ptr<HloInstruction> unary_inst = HloInstruction::CreateUnary(
       r0f32_, HloOpcode::kExp,
       HloInstruction::CreateParameter(0, r0f32_, "foo").get(), result_accuracy);
-  EXPECT_TRUE(protobuf_util::ProtobufEquals(result_accuracy,
-                                            unary_inst->result_accuracy()));
+  EXPECT_THAT(unary_inst->result_accuracy(), EqualsProto(result_accuracy));
 }
 
 TEST_F(HloInstructionTest, PrintUnaryWithResultAccuracy) {
@@ -3389,6 +3380,29 @@ TEST_F(HloInstructionTest, DifferentResultAccuracy) {
   result_accuracy_rtol.mutable_tolerance()->set_rtol(0.4);
   exp2->set_result_accuracy(result_accuracy_rtol);
   EXPECT_FALSE(exp1->equal_result_accuracy(exp2));
+}
+
+TEST_F(HloInstructionTest, PreserveOriginalValueThroughClone) {
+  HloComputation::Builder builder(TestName());
+  auto* constant = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR2<float>({
+          {1, 2},
+          {3, 4},
+      })));
+  constant->set_original_value(OriginalValue::CreateFromInstruction(constant));
+  auto* tuple =
+      builder.AddInstruction(HloInstruction::CreateTuple({constant, constant}));
+  tuple->set_original_value(OriginalValue::CreateFromInstruction(constant));
+  auto clone_shape = ShapeUtil::MakeShape(F32, {2, 2});
+  auto tuple_clone_same_shape = tuple->CloneWithNewOperands(
+      ShapeUtil::MakeTupleShape({clone_shape, clone_shape}), {});
+  clone_shape = ShapeUtil::MakeShape(F32, {3, 3});
+  auto tuple_clone_different_shape = tuple->CloneWithNewOperands(
+      ShapeUtil::MakeTupleShape({clone_shape, clone_shape}), {});
+  // Only the tuple clone with the same shape as the original tuple should
+  // preserve the original value.
+  EXPECT_TRUE(tuple_clone_same_shape->original_value());
+  EXPECT_FALSE(tuple_clone_different_shape->original_value());
 }
 
 }  // namespace

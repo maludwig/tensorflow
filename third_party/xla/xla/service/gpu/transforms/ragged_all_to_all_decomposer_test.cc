@@ -17,13 +17,12 @@ limitations under the License.
 
 #include <memory>
 
+#include <gtest/gtest.h>
 #include "absl/log/log.h"
 #include "xla/hlo/ir/hlo_print_options.h"
 #include "xla/hlo/testlib/filecheck.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/service/hlo_cse.h"
-#include "xla/service/hlo_runner.h"
-#include "xla/service/platform_util.h"
-#include "xla/tests/hlo_runner_agnostic_test_base.h"
 #include "xla/tests/test_utils.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/statusor.h"
@@ -35,12 +34,7 @@ namespace {
 
 using ::testing::HasSubstr;
 
-class RaggedAllToAllDecomposerTest : public HloRunnerAgnosticTestBase {
- public:
-  RaggedAllToAllDecomposerTest()
-      : HloRunnerAgnosticTestBase(std::make_unique<HloRunner>(
-            PlatformUtil::GetDefaultPlatform().value())) {}
-};
+using RaggedAllToAllDecomposerTest = HloHardwareIndependentTestBase;
 
 TEST_F(RaggedAllToAllDecomposerTest, SimpleRaggedAllToAllIsSupported) {
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(R"(
@@ -82,9 +76,9 @@ ENTRY main {
 }
 
 TEST_F(RaggedAllToAllDecomposerTest,
-       RaggedAllToAllWithoutReplicaGroupsIsNotSupported) {
+       RaggedAllToAllWithoutReplicaGroupsIsSupported) {
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(R"(
-HloModule module
+HloModule module, replica_count=2
 
 ENTRY main {
   input = bf16[16] parameter(0)
@@ -100,7 +94,25 @@ ENTRY main {
 
   RaggedAllToAllDecomposer decomposer;
   TF_ASSERT_OK_AND_ASSIGN(bool changed, decomposer.Run(module.get(), {}));
-  EXPECT_FALSE(changed);
+  EXPECT_TRUE(changed);
+  TF_EXPECT_OK(VerifyHloModule(module.get(), true, true));
+  TF_EXPECT_OK(HloCSE(true).Run(module.get()));
+
+  EXPECT_TRUE(*RunFileCheck(module->ToString(), R"(
+    // CHECK: s64[2,1]{1,0} all-to-all
+    // CHECK: dynamic-slice
+    // CHECK: reshape
+    // CHECK: concatenate
+    // CHECK: dynamic-slice
+    // CHECK: reshape
+    // CHECK: concatenate
+    // CHECK: (bf16[1,16]{1,0}, bf16[1,16]{1,0}) all-to-all
+    // CHECK: dynamic-update-slice
+    // CHECK: iota
+    // CHECK: compare
+    // CHECK: select
+    // CHECK: select
+  )"));
 }
 
 TEST_F(RaggedAllToAllDecomposerTest,

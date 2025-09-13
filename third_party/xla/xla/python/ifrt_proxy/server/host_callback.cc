@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,7 @@
 #include "xla/shape_util.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 namespace ifrt {
@@ -98,22 +100,23 @@ RemoteLoadedHostCallback::CreateFromSerialized(
         "Unable to deserialize RemoteLoadedHostCallback");
   }
 
-  auto from_proto =
-      [](const auto& arg_protos) -> std::vector<xla::HostCallbackArgInfo> {
+  auto from_proto = [](const auto& arg_protos)
+      -> absl::StatusOr<std::vector<xla::HostCallbackArgInfo>> {
     std::vector<xla::HostCallbackArgInfo> args;
     args.reserve(arg_protos.size());
     for (const xla::ifrt::XlaHostCallbackProto::ArgInfo& arg_proto :
          arg_protos) {
       xla::HostCallbackArgInfo& arg = args.emplace_back();
       arg.channel_id = static_cast<uint16_t>(arg_proto.channel_id());
-      arg.shape = xla::Shape(arg_proto.shape());
+      TF_ASSIGN_OR_RETURN(arg.shape, xla::Shape::FromProto(arg_proto.shape()));
     }
     return args;
   };
 
+  TF_ASSIGN_OR_RETURN(auto operands, from_proto(proto.operands()));
+  TF_ASSIGN_OR_RETURN(auto results, from_proto(proto.results()));
   return tsl::MakeRef<RemoteLoadedHostCallback>(
-      client, from_proto(proto.operands()), from_proto(proto.results()),
-      std::move(queue));
+      client, std::move(operands), std::move(results), std::move(queue));
 }
 
 RemoteLoadedHostCallback::RemoteLoadedHostCallback(
@@ -161,8 +164,8 @@ absl::Status RemoteLoadedHostCallback::Execute(void** result_ptrs,
   to_buffer(host_callback().operands, operand_ptrs, request.operands);
   to_buffer(host_callback().results, result_ptrs, request.results);
 
-  request.status = Future<>::CreatePromise();
-  Future<> status(request.status);
+  Future<> status;
+  std::tie(request.status, status) = Future<>::MakePromise();
 
   // Enqueue the execution request. `IfrtBackend` retrieves this by calling
   // `PopExecutionRequest` and fulfills the `results` promise.

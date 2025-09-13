@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/record_yielder.h"
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/lib/io/record_reader.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/env.h"
@@ -71,7 +72,7 @@ absl::Status RecordYielder::YieldOne(tstring* value) {
 struct RecordYielder::Shard {
   int index;                      // Shard index.
   std::vector<tstring> filenames;  // File names given to this shard.
-  Notification done;              // Notified when this shard is done.
+  absl::Notification done;         // Notified when this shard is done.
   absl::Status status;            // Shard status.
 };
 
@@ -220,7 +221,7 @@ void RecordYielder::ShardLoop(Shard* shard) {
           shard->status = errors::Aborted("stopped");
           break;
         }
-      } else if (errors::IsOutOfRange(s)) {
+      } else if (absl::IsOutOfRange(s)) {
         break;
       } else {
         shard->status = s;

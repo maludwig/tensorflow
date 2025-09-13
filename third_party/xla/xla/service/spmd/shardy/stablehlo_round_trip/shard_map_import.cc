@@ -277,7 +277,8 @@ class ShardMapImportPass
     llvm::SmallDenseMap<StringRef, mlir::Region*> shardMapNameToMovedRegion;
     bool success = true;
     module->walk([&](CallOp op) {
-      if (!op.getCallee().contains("shmap_body")) {
+      if (!op.getCallee().contains("shmap_body") &&
+          !op.getCallee().contains(kInlineableManualComputationFuncName)) {
         return mlir::WalkResult::advance();
       }
 
@@ -351,9 +352,8 @@ class ShardMapImportPass
       }
 
       auto manualComputationOp = builder.create<ManualComputationOp>(
-          op->getLoc(), resultTypes, newOperands,
-          TensorShardingPerValueAttr::get(context, inShardings),
-          TensorShardingPerValueAttr::get(context, outShardings), manualAxes);
+          op->getLoc(), resultTypes, newOperands, inShardings, outShardings,
+          manualAxes);
 
       // Inline or clone the called function.
       mlir::Region& manualComputationRegion = manualComputationOp.getRegion();

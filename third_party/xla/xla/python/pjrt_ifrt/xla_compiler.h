@@ -28,6 +28,8 @@ limitations under the License.
 #include "mlir/IR/OwningOpRef.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/python/ifrt/compiler.h"
+#include "xla/python/ifrt/device_list.h"
+#include "xla/python/ifrt/executable_serdes.h"
 #include "xla/python/ifrt/host_callback.h"
 
 namespace xla {
@@ -43,12 +45,15 @@ struct XlaCompileOptions
     : llvm::RTTIExtends<XlaCompileOptions, CompileOptions> {
   XlaCompileOptions() = default;
   explicit XlaCompileOptions(xla::CompileOptions compile_options,
+                             DeviceListRef devices,
                              std::vector<tsl::RCReference<LoadedHostCallback>>
                                  loaded_host_callbacks = {})
       : compile_options(std::move(compile_options)),
+        devices(std::move(devices)),
         loaded_host_callbacks(std::move(loaded_host_callbacks)) {}
 
   xla::CompileOptions compile_options;
+  DeviceListRef devices;
   std::vector<tsl::RCReference<LoadedHostCallback>> loaded_host_callbacks;
 
   // CompileOptions implementation.
@@ -64,15 +69,20 @@ struct XlaCompileOptions
 //
 // TODO(hyeontaek): Move `loaded_host_callbacks` to a (new) `LoadOptions`
 // because deserialization (without loading) should not take them.
+// TODO(emilyaf): Make `devices` non-optional once it is plumbed through from
+// Australis.
 struct XlaDeserializeExecutableOptions
     : llvm::RTTIExtends<XlaDeserializeExecutableOptions,
                         DeserializeExecutableOptions> {
   XlaDeserializeExecutableOptions() = default;
   explicit XlaDeserializeExecutableOptions(
       std::optional<xla::CompileOptions> compile_options,
+      std::optional<DeviceListRef> devices,
       std::vector<tsl::RCReference<LoadedHostCallback>> loaded_host_callbacks =
           {})
-      : compile_options(std::move(compile_options)),
+      : llvm::RTTIExtends<XlaDeserializeExecutableOptions,
+                          DeserializeExecutableOptions>(std::move(devices)),
+        compile_options(std::move(compile_options)),
         loaded_host_callbacks(std::move(loaded_host_callbacks)) {}
 
   // `compile_options` may be unspecified if deserialization does not override
@@ -96,6 +106,15 @@ absl::StatusOr<std::unique_ptr<XlaCompileOptions>> GetXlaCompileOptions(
 absl::StatusOr<std::unique_ptr<XlaDeserializeExecutableOptions>>
 GetXlaDeserializeExecutableOptions(
     std::unique_ptr<DeserializeExecutableOptions> options);
+
+// Gets `xla::ifrt::DeviceListRef` from `xla::DeviceAssignment`.
+absl::StatusOr<xla::ifrt::DeviceListRef> GetDeviceListFromDeviceAssignment(
+    xla::ifrt::Client* ifrt_client,
+    const xla::DeviceAssignment& device_assignment);
+
+// Gets `xla::ifrt::DeviceListRef` from `xla::XlaCompileOptions`.
+absl::StatusOr<xla::ifrt::DeviceListRef> GetDeviceListFromXlaCompileOptions(
+    xla::ifrt::Client* ifrt_client, const xla::CompileOptions& compile_options);
 
 }  // namespace ifrt
 }  // namespace xla

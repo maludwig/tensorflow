@@ -20,8 +20,10 @@ limitations under the License.
 #ifndef XLA_STREAM_EXECUTOR_DEVICE_DESCRIPTION_H_
 #define XLA_STREAM_EXECUTOR_DEVICE_DESCRIPTION_H_
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -29,6 +31,8 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
@@ -47,86 +51,12 @@ class RocmComputeCapability {
   explicit RocmComputeCapability(std::string gcn_arch_name)
       : gcn_arch_name_(std::move(gcn_arch_name)) {}
 
-  explicit RocmComputeCapability(const RocmComputeCapabilityProto &proto)
+  explicit RocmComputeCapability(const RocmComputeCapabilityProto& proto)
       : gcn_arch_name_(proto.gcn_arch_name()) {}
 
   RocmComputeCapability() = default;
 
   std::string gcn_arch_name() const { return gcn_arch_name_; }
-
-  std::string gfx_version() const {
-    std::vector<std::string> tokens = absl::StrSplit(gcn_arch_name_, ':');
-    return tokens[0];
-  }
-
-  bool is_supported_gfx_version() const {
-    return absl::c_count(kSupportedGfxVersions, gfx_version()) != 0;
-  }
-
-  std::string supported_gfx_versions_str() const {
-    return absl::StrJoin(kSupportedGfxVersions, ", ");
-  }
-
-  bool gfx9_mi100() const { return gfx_version() == "gfx908"; }
-
-  bool gfx9_mi200() const { return gfx_version() == "gfx90a"; }
-
-  bool gfx9_mi300_series() const {
-    return gfx_version() == "gfx942" || gfx_version() == "gfx950";
-  }
-
-  bool gfx9_mi100_or_later() const {
-    static constexpr absl::string_view kList[] = {"gfx908", "gfx90a", "gfx942",
-                                                  "gfx950"};
-    return absl::c_count(kList, gfx_version()) != 0;
-  }
-
-  bool gfx9_mi200_or_later() const {
-    static constexpr absl::string_view kList[] = {"gfx90a", "gfx942", "gfx950"};
-    return absl::c_count(kList, gfx_version()) != 0;
-  }
-
-  bool gfx10_rx68xx() const { return gfx_version() == "gfx1030"; }
-
-  bool gfx10_rx69xx() const { return gfx_version() == "gfx1030"; }
-
-  bool gfx11() const { return gfx_version().find("gfx11"); }
-
-  bool gfx1200() const { return gfx_version() == "gfx1200"; }
-
-  bool gfx1201() const { return gfx_version() == "gfx1201"; }
-
-  bool has_nhwc_layout_support() const { return gfx9_mi100_or_later(); }
-
-  bool has_bf16_dtype_support() const { return gfx9_mi100_or_later(); }
-
-  bool has_fast_fp16_support() const {
-    return gfx9_mi100_or_later() || gfx10_rx68xx() || gfx10_rx69xx() || gfx11();
-  }
-
-  bool has_mfma_instr_support() const { return gfx9_mi100_or_later(); }
-
-  bool has_amd_matrix_core() const {
-    return (gfx9_mi100_or_later() || gfx_version().find("gfx11") ||
-            gfx_version().find("gfx12"));
-  }
-
-  bool has_fp16_atomics_support() const {
-    // TODO(rocm): Check. This should be the same as has_fast_fp16_support().
-    return gfx9_mi200_or_later();
-  }
-
-  bool fence_before_barrier() const {
-    return gfx_version() != "gfx900" && gfx_version() != "gfx906";
-  }
-
-  bool has_hipblaslt() const {
-    return gfx9_mi200_or_later() || gfx1200() || gfx1201();
-  }
-
-  bool has_fp8_support() const {
-    return gfx9_mi300_series() || gfx1200() || gfx1201();
-  }
 
   std::string ToString() const { return gcn_arch_name(); }
 
@@ -136,24 +66,159 @@ class RocmComputeCapability {
     return proto;
   }
 
-  bool operator==(const RocmComputeCapability &other) const {
+  bool operator==(const RocmComputeCapability& other) const {
     return gcn_arch_name_ == other.gcn_arch_name_;
   }
 
- private:
-  std::string gcn_arch_name_ = "gfx000";  // default to invalid arch.
+  bool operator!=(const RocmComputeCapability& other) const {
+    return !this->operator==(other);
+  }
 
+  std::string gfx_version() const {
+    //  std::strchr() is faster for the case than std::string::find()
+    const char* const p_colon = std::strchr(gcn_arch_name_.c_str(), ':');
+    if (nullptr == p_colon) {
+      return gcn_arch_name_;  // likely it's the default invalid value
+    }
+    return std::string(gcn_arch_name_.c_str(), p_colon);
+  }
+
+  // note, while there's no particular reason to make the lists public, it won't
+  // hurt since they are immutable, but keeping them close to methods simplifies
+  // maintanance.
   static constexpr absl::string_view kSupportedGfxVersions[]{
       "gfx900",   // MI25
       "gfx906",   // MI50 / MI60
       "gfx908",   // MI100
       "gfx90a",   // MI200
       "gfx942",   // MI300
-      "gfx950",   // MI355
+      "gfx950",   // MI350
       "gfx1030",  // RX68xx / RX69xx
       "gfx1100",  // RX7900
-      "gfx1101", "gfx1200", "gfx1201",
+      "gfx1101",  // RX7700 / RX7800
+      "gfx1103", "gfx1150", "gfx1151", "gfx1200", "gfx1201",
   };
+
+  bool is_supported_gfx_version() const {
+    return IsThisGfxInAnyList(kSupportedGfxVersions);
+  }
+
+  std::string supported_gfx_versions_str() const {
+    return absl::StrJoin(kSupportedGfxVersions, ", ");
+  }
+
+  bool gfx9_mi100() const { return gfx_version() == "gfx908"; }
+
+  static constexpr absl::string_view kMI100Series[] = {"gfx908"};
+
+  bool gfx9_mi200() const { return gfx_version() == "gfx90a"; }
+
+  static constexpr absl::string_view kMI200Series[] = {"gfx90a"};
+
+  bool gfx9_mi300() const { return gfx_version() == "gfx942"; }
+
+  bool gfx9_mi350() const { return gfx_version() == "gfx950"; }
+
+  static constexpr absl::string_view kMI300Series[] = {"gfx942", "gfx950"};
+  bool gfx9_mi300_series() const { return IsThisGfxInAnyList(kMI300Series); }
+
+  bool gfx9_mi100_or_later() const {
+    return IsThisGfxInAnyList(kMI300Series, kMI200Series, kMI100Series);
+  }
+
+  bool gfx9_mi200_or_later() const {
+    return IsThisGfxInAnyList(kMI300Series, kMI200Series);
+  }
+
+  bool gfx10_rx68xx() const { return gfx_version() == "gfx1030"; }
+
+  bool gfx10_rx69xx() const { return gfx_version() == "gfx1030"; }
+
+  bool gfx11() const { return absl::StartsWith(gfx_version(), "gfx11"); }
+
+  static constexpr absl::string_view kGfx11Discrete[] = {"gfx1100", "gfx1101"};
+  bool gfx11_discrete() const { return IsThisGfxInAnyList(kGfx11Discrete); }
+
+  static constexpr absl::string_view kGfx11Apu[] = {"gfx1103", "gfx1150",
+                                                    "gfx1151"};
+  bool gfx11_apu() const { return IsThisGfxInAnyList(kGfx11Apu); }
+
+  static constexpr absl::string_view kGfx11Rx7900[] = {"gfx1100", "gfx1101",
+                                                       "gfx1102"};
+  bool gfx11_rx7900() const {
+    // TODO(AMD/TF): instead of this, other gfx11*() methods might be better
+    return IsThisGfxInAnyList(kGfx11Rx7900);
+  }
+
+  bool gfx12() const { return absl::StartsWith(gfx_version(), "gfx12"); }
+
+  static constexpr absl::string_view kGfx12Discrete[] = {"gfx1200", "gfx1201"};
+  bool gfx12_discrete() const { return IsThisGfxInAnyList(kGfx12Discrete); }
+
+  bool gfx12_rx8900() const { return gfx12_discrete(); }
+
+  bool has_nhwc_layout_support() const { return gfx9_mi100_or_later(); }
+
+  bool has_bf16_dtype_support() const {
+    return gfx9_mi100_or_later() || gfx12() || gfx11();
+  }
+
+  bool has_fast_fp16_support() const {
+    return gfx9_mi100_or_later() || gfx11() || gfx10_rx68xx() || gfx10_rx69xx();
+  }
+
+  bool has_mfma_instr_support() const { return gfx9_mi100_or_later(); }
+
+  bool has_amd_matrix_core() const {
+    return gfx9_mi100_or_later() || gfx12() || gfx11();
+  }
+
+  bool has_packed_fp16_atomics_support() const { return gfx9_mi100_or_later(); }
+
+  bool has_packed_bf16_atomics_support() const { return gfx9_mi300_series(); }
+
+  bool fence_before_barrier() const {
+    static constexpr absl::string_view kList[] = {"gfx900", "gfx906"};
+    return !IsThisGfxInAnyList(kList);
+  }
+
+  bool has_hipblaslt() const {
+    return IsThisGfxInAnyList(kMI300Series, kMI200Series, kGfx12Discrete,
+                              kGfx11Discrete, kGfx11Apu);
+  }
+
+  bool has_fp8_support() const {
+    return has_ocp_fp8_support() || has_nanoo_fp8_support();
+  }
+
+  bool has_ocp_fp8_support() const { return gfx9_mi350() || gfx12_discrete(); }
+
+  bool has_nanoo_fp8_support() const { return gfx9_mi300(); }
+
+  /// \brief Invalid gfx id for default gcn_arch_name_ value and testing
+  static constexpr absl::string_view kInvalidGfx = "gfx000";
+
+ private:
+  /// \brief Takes one or more arrays of string-like objects and tests if the
+  /// result of `gfx_version()` matches to any string in any of the arrays.
+  template <typename... ArrayOfStrings>
+  bool IsThisGfxInAnyList(ArrayOfStrings&&... arr) const {
+    static_assert(sizeof...(arr) >= 1);
+    const auto gfx = gfx_version();
+    return (implIsThisGfxInAnyList(std::begin(arr), std::end(arr), gfx) || ...);
+  }
+
+  /// \brief Template-less implementation of IsThisGfxInAnyList().
+  /// \warning Don't use directly!
+  bool implIsThisGfxInAnyList(const absl::string_view* beg,
+                              const absl::string_view* end,
+                              const std::string& gfx) const {
+    return std::any_of(beg, end, [&gfx = gfx](const absl::string_view& s) {
+      return gfx == s;
+    });
+  }
+
+  std::string gcn_arch_name_{kInvalidGfx};  // default to invalid arch.
 };
 
 using GpuComputeCapability =
@@ -170,7 +235,7 @@ class DeviceDescription {
   // Returns the platform being run on; this value is primarily intended for
   // printing, and comes out something like "OpenCL 1.2" or "Compute Capability
   // 3.5".
-  const std::string &platform_version() const { return platform_version_; }
+  const std::string& platform_version() const { return platform_version_; }
 
   // Returns the driver version interfacing with the underlying platform.
   // Note for CUDA this returns the CUDA Toolkit version the driver ships with.
@@ -184,8 +249,11 @@ class DeviceDescription {
     return compile_time_toolkit_version_;
   }
 
+  // Returns the DNN version (cuDNN or hipDNN) - or 0.0.0 if not available.
+  SemanticVersion dnn_version() const { return dnn_version_; }
+
   // Returns the name that the device reports. Vendor dependent.
-  const std::string &name() const { return name_; }
+  const std::string& name() const { return name_; }
 
   // Gets a human-readable description of the device, e.g. "nvidia GPU
   // supporting sm75 with 32GB RAM, 80 SMs, ...".  This is intended to be the
@@ -195,11 +263,11 @@ class DeviceDescription {
   // This string is not guaranteed to be stable between versions.  Please DO NOT
   // rely on it never changing.  (Within one version of the code, it won't
   // change, don't worry.)
-  const std::string &model_str() const { return model_str_; }
+  const std::string& model_str() const { return model_str_; }
 
   // Returns the PCI bus identifier for this device, of the form
   // [domain]:[bus]:[device].[function]
-  const std::string &pci_bus_id() const { return pci_bus_id_; }
+  const std::string& pci_bus_id() const { return pci_bus_id_; }
 
   // Returns the NUMA node associated with this device, for use in
   // determining socket locality. If the NUMA node could not be determined, -1
@@ -217,23 +285,23 @@ class DeviceDescription {
   // Returns the limit on the thread dimensionality values in each of the
   // respective dimensions. These limits affect what constitutes a legitimate
   // kernel launch request.
-  const ThreadDim &thread_dim_limit() const { return thread_dim_limit_; }
+  const ThreadDim& thread_dim_limit() const { return thread_dim_limit_; }
 
   // Returns the limit on the block dimensionality values in each of the
   // respective dimensions. These limits may affect what constitutes a
   // legitimate kernel launch request.
-  const BlockDim &block_dim_limit() const { return block_dim_limit_; }
+  const BlockDim& block_dim_limit() const { return block_dim_limit_; }
 
   // Returns the limit on the total number of threads that can be launched in a
   // single block; i.e. the limit on x * y * z dimensions of a ThreadDim.
   // This limit affects what constitutes a legitimate kernel launch request.
-  const int64_t &threads_per_block_limit() const {
+  const int64_t& threads_per_block_limit() const {
     return threads_per_block_limit_;
   }
 
   // Returns the limit on the total number of threads that can be simultaneously
   // launched on a given multiprocessor.
-  const int64_t &threads_per_core_limit() const {
+  const int64_t& threads_per_core_limit() const {
     return threads_per_core_limit_;
   }
 
@@ -241,20 +309,20 @@ class DeviceDescription {
   constexpr int64_t threads_per_warp() const { return threads_per_warp_; }
 
   // Returns the limit on the total number of registers per core.
-  const int64_t &registers_per_core_limit() const {
+  const int64_t& registers_per_core_limit() const {
     return registers_per_core_limit_;
   }
 
   // Returns the limit on the total number of registers that can be
   // simultaneously used by a block.
-  const int64_t &registers_per_block_limit() const {
+  const int64_t& registers_per_block_limit() const {
     return registers_per_block_limit_;
   }
 
   // Returns the number of address bits available to kernel code running on the
   // platform. This affects things like the maximum allocation size and perhaps
   // types used in kernel code such as size_t.
-  const int64_t &device_address_bits() const { return device_address_bits_; }
+  const int64_t& device_address_bits() const { return device_address_bits_; }
 
   // Returns the device memory size in bytes.
   int64_t device_memory_size() const { return device_memory_size_; }
@@ -275,11 +343,11 @@ class DeviceDescription {
 
   // Returns the device vendor string, e.g., "NVIDIA Corporation", "Advanced
   // Micro Devices, Inc.", or "GenuineIntel".
-  const std::string &device_vendor() const { return device_vendor_; }
+  const std::string& device_vendor() const { return device_vendor_; }
 
   // Returns the CUDA compute capability if we're running on the CUDA platform.
   // If a CUDA compute capability is not available, the major version will be
-  // zero.
+  // negative.
   CudaComputeCapability cuda_compute_capability() const;
 
   // Returns the ROCm compute capability if we're running on the ROCm platform.
@@ -287,7 +355,7 @@ class DeviceDescription {
   // be "gfx000" (which is an invalid gfx arch).
   RocmComputeCapability rocm_compute_capability() const;
 
-  const GpuComputeCapability &gpu_compute_capability() const;
+  const GpuComputeCapability& gpu_compute_capability() const;
 
   // Returns the maximum amount of shared memory present on a single core
   // (i.e. Streaming Multiprocessor on NVIDIA GPUs; Compute Unit for OpenCL
@@ -311,7 +379,7 @@ class DeviceDescription {
   // much smaller than the cache size will likely stay in it.
   constexpr int64_t l1_cache_size_per_SM() const {
     return std::visit(
-        [](const auto &capability) -> int64_t {
+        [](const auto& capability) -> int64_t {
           if constexpr (std::is_same_v<std::decay_t<decltype(capability)>,
                                        RocmComputeCapability>) {
             // MI100 and MI200 has 16KB L1 cache per CU.
@@ -331,7 +399,7 @@ class DeviceDescription {
 
   constexpr int64_t dram_to_l2_transaction_size_bytes() const {
     return std::visit(
-        [](const auto &capability) -> int {
+        [](const auto& capability) -> int {
           if constexpr (std::is_same_v<std::decay_t<decltype(capability)>,
                                        RocmComputeCapability>) {
             // DRAM->L2 bus is 128 Byte width for MI300.
@@ -352,7 +420,7 @@ class DeviceDescription {
 
   constexpr int64_t memory_transactions_per_clock() const {
     return std::visit(
-        [](const auto &capability) -> int {
+        [](const auto& capability) -> int {
           if constexpr (std::is_same_v<std::decay_t<decltype(capability)>,
                                        RocmComputeCapability>) {
             // 16 works well on MI300.
@@ -371,13 +439,14 @@ class DeviceDescription {
   std::string ToString() const;
 
   DeviceDescription() = default;
-  explicit DeviceDescription(const GpuDeviceInfoProto &proto);
+  static absl::StatusOr<DeviceDescription> FromProto(
+      const GpuDeviceInfoProto& proto);
 
   // For string values that are not available via the underlying platform, this
   // value will be provided.
-  static inline const char *const kUndefinedString = "<undefined>";
+  static inline const char* const kUndefinedString = "<undefined>";
 
-  void set_gpu_compute_capability(const GpuComputeCapability &c) {
+  void set_gpu_compute_capability(const GpuComputeCapability& c) {
     gpu_compute_capability_ = c;
   }
 
@@ -393,23 +462,24 @@ class DeviceDescription {
   void set_platform_version(std::string value) {
     platform_version_ = std::move(value);
   }
-  void set_driver_version(const SemanticVersion &value) {
+  void set_driver_version(const SemanticVersion& value) {
     driver_version_ = value;
   }
-  void set_runtime_version(const SemanticVersion &value) {
+  void set_runtime_version(const SemanticVersion& value) {
     runtime_version_ = value;
   }
-  void set_compile_time_toolkit_version(const SemanticVersion &value) {
+  void set_dnn_version(const SemanticVersion& value) { dnn_version_ = value; }
+  void set_compile_time_toolkit_version(const SemanticVersion& value) {
     compile_time_toolkit_version_ = value;
   }
   void set_pci_bus_id(std::string value) { pci_bus_id_ = std::move(value); }
   void set_name(std::string value) { name_ = std::move(value); }
   void set_model_str(std::string value) { model_str_ = std::move(value); }
 
-  void set_thread_dim_limit(const ThreadDim &value) {
+  void set_thread_dim_limit(const ThreadDim& value) {
     thread_dim_limit_ = value;
   }
-  void set_block_dim_limit(const BlockDim &value) { block_dim_limit_ = value; }
+  void set_block_dim_limit(const BlockDim& value) { block_dim_limit_ = value; }
 
   void set_threads_per_core_limit(int64_t value) {
     threads_per_core_limit_ = value;
@@ -443,8 +513,8 @@ class DeviceDescription {
 
   void set_clock_rate_ghz(float value) { clock_rate_ghz_ = value; }
 
-  void set_cuda_compute_capability(int major, int minor) {
-    gpu_compute_capability_ = CudaComputeCapability{major, minor};
+  void set_cuda_compute_capability(const CudaComputeCapability& cc) {
+    gpu_compute_capability_ = cc;
   }
 
   void set_rocm_compute_capability(std::string gcn_arch_name) {
@@ -505,21 +575,22 @@ class DeviceDescription {
   SemanticVersion driver_version_{0, 0, 0};
   SemanticVersion runtime_version_{0, 0, 0};
   SemanticVersion compile_time_toolkit_version_{0, 0, 0};
+  SemanticVersion dnn_version_{0, 0, 0};
 };
 
 // Returns whether the given thread_dim is acceptable given the limits described
 // in device_description. For detailed reasons for failing the predicate, enable
 // VLOG(2) for this module.
-bool ThreadDimOk(const DeviceDescription &device_description,
-                 const ThreadDim &thread_dim);
+bool ThreadDimOk(const DeviceDescription& device_description,
+                 const ThreadDim& thread_dim);
 
 // Calculate the number of threads/blocks required to process element_count
 // elements. Note that you can still end up with more threads than
 // element_count due to rounding, so kernels often start with an "is this
 // thread id in the element_count range?" test.
-void CalculateDimensionality(const DeviceDescription &device_description,
-                             int64_t element_count, int64_t *threads_per_block,
-                             int64_t *block_count);
+void CalculateDimensionality(const DeviceDescription& device_description,
+                             int64_t element_count, int64_t* threads_per_block,
+                             int64_t* block_count);
 
 }  // namespace stream_executor
 

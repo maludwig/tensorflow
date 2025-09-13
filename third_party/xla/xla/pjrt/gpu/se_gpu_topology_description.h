@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -27,6 +28,8 @@ limitations under the License.
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_device_description.h"
 #include "xla/pjrt/pjrt_stream_executor_device_description.h"
+#include "xla/stream_executor/device_description.pb.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 
@@ -43,7 +46,9 @@ class StreamExecutorGpuTopologyDescription : public PjRtTopologyDescription {
         platform_name_(platform_name),
         gpu_topology_(std::move(gpu_topology)),
         attributes_(attributes),
-        target_config_(std::move(target_config)) {}
+        target_config_(std::move(target_config)) {
+    CHECK(gpu_topology_ != nullptr);
+  }
 
   bool operator==(const StreamExecutorGpuTopologyDescription& other) const {
     return this->platform_id() == other.platform_id() &&
@@ -60,16 +65,14 @@ class StreamExecutorGpuTopologyDescription : public PjRtTopologyDescription {
     return gpu_topology_->platform_version();
   }
 
+  static void SetupDeviceDescription(
+      PjRtStreamExecutorDeviceDescription& description,
+      const std::string& device_vendor, const std::string& compute_capability,
+      int core_count, int64_t shared_memory_per_block_optin,
+      int partition_index);
+
   std::vector<std::unique_ptr<const PjRtDeviceDescription>> DeviceDescriptions()
-      const override {
-    std::vector<std::unique_ptr<const PjRtDeviceDescription>> devices;
-    devices.reserve(gpu_topology_->number_of_devices());
-    for (const int device_id : gpu_topology_->device_ids()) {
-      devices.push_back(std::make_unique<PjRtStreamExecutorDeviceDescription>(
-          device_id, std::string(platform_version())));
-    }
-    return devices;
-  }
+      const override;
 
   const GpuTopology& gpu_topology() const { return *gpu_topology_; }
   const GpuTopology* gpu_topology_ptr() const { return gpu_topology_.get(); }

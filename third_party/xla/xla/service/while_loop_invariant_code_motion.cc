@@ -341,8 +341,8 @@ WhileLoopInvariantCodeMotion::TryHoistingInvariantInstructionsFromWhileBody(
 absl::StatusOr<bool> WhileLoopInvariantCodeMotion::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
-  VLOG(2) << "HLO module before WhileLoopInvariantCodeMotion:";
-  XLA_VLOG_LINES(2, module->ToString());
+  VLOG(3) << "HLO module before WhileLoopInvariantCodeMotion:";
+  XLA_VLOG_LINES(3, module->ToString());
 
   bool changed = false;
   std::vector<HloInstruction*> while_instrs;
@@ -352,6 +352,11 @@ absl::StatusOr<bool> WhileLoopInvariantCodeMotion::Run(
   }
   BoundNonLinearCompilerAnalysis allowance(module, name(), 10);
 
+  // Currently, if a loop body that is used by multiple while
+  // ops contains an op that can be hoisted, we will make a new computation for
+  // each of the while ops, instead of using one shared new computation. This is
+  // probably fine, but we may want to improve it in the future if we decide to
+  // double-down on shared while bodies.
   for (HloInstruction* while_instr : while_instrs) {
     // Right now we only hoist computations from the while body, but
     // TryHoistingInvariantInstructionsFromWhileBody can be generalized to
@@ -368,6 +373,18 @@ absl::StatusOr<bool> WhileLoopInvariantCodeMotion::Run(
     if (!allowance.ContinueAnalysis()) {
       break;
     }
+
+    if (while_instr->frontend_attributes().map().contains(
+            "_xla_disable_loop_instr_hoisting")) {
+      // If this frontend attr is present, we have knowledge from the framework
+      // to disable hoisting from this loop.
+      auto print_no_metadata = HloPrintOptions{}.set_print_metadata(false);
+      std::string while_instr_name = while_instr->ToString(print_no_metadata);
+      VLOG(2) << "Skipping hoisting from: " << while_instr_name
+              << " because it is disabled via xla metadata.";
+      continue;
+    }
+
     TF_ASSIGN_OR_RETURN(
         bool result,
         TryHoistingInvariantInstructionsFromWhileBody(while_instr, &allowance));
@@ -387,10 +404,10 @@ absl::StatusOr<bool> WhileLoopInvariantCodeMotion::Run(
   }
 
   if (changed) {
-    VLOG(2) << "HLO module after WhileLoopInvariantCodeMotion:";
-    XLA_VLOG_LINES(2, module->ToString());
+    VLOG(3) << "HLO module after WhileLoopInvariantCodeMotion:";
+    XLA_VLOG_LINES(3, module->ToString());
   } else {
-    VLOG(2) << "HLO module unchanged after WhileLoopInvariantCodeMotion";
+    VLOG(3) << "HLO module unchanged after WhileLoopInvariantCodeMotion";
   }
 
   return changed;

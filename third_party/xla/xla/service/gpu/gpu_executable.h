@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -28,21 +29,23 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "absl/types/variant.h"
 #include "xla/backends/gpu/runtime/annotation.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/service/computation_layout.h"
 #include "xla/service/executable.h"
+#include "xla/service/gpu/alias_info.h"
 #include "xla/service/gpu/buffer_allocations.h"
+#include "xla/service/gpu/gpu_executable.pb.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/service_executable_run_options.h"
 #include "xla/service/shaped_buffer.h"
-#include "xla/service/xla_debug_info_manager.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
@@ -77,21 +80,35 @@ class GpuExecutable : public Executable {
     // Whether this output is hinted to alias a parameter (BufferAllocation*
     // would indicate the aliased parameter), and what kind of alias it is.
     std::optional<HloInputOutputAliasConfig::Alias> alias_config;
+
+    OutputInfoProto ToProto() const;
+    static absl::StatusOr<OutputInfo> FromProto(const OutputInfoProto& proto);
+
+    friend bool operator==(const OutputInfo& lhs, const OutputInfo& rhs) {
+      return std::tie(lhs.allocation_index, lhs.passthrough,
+                      lhs.alias_config) ==
+             std::tie(rhs.allocation_index, rhs.passthrough, rhs.alias_config);
+    }
+
+    friend bool operator!=(const OutputInfo& lhs, const OutputInfo& rhs) {
+      return !(lhs == rhs);
+    }
   };
 
   struct Params {
     std::string asm_text;
     std::vector<uint8_t> binary;
     BinaryMap dnn_compiled_graphs;
-    se::GpuComputeCapability gpu_version;
     std::unique_ptr<SequentialThunk> executable;
     std::vector<ConstantInfo> constants;
     absl::flat_hash_map<ShapeIndex, OutputInfo> output_info;
     std::string module_name;
-    xla::Shape output_shape;
+    ProgramShape program_shape;
     std::optional<std::vector<BufferAllocation>> mlir_allocations;
     std::unique_ptr<const BufferAssignment> buffer_assignment;
-    int64_t debug_buffer_assignment_show_max;
+    std::unique_ptr<GpuAliasInfo> alias_info;
+    DebugOptions debug_options;
+    se::DeviceDescription device_description;
     std::unique_ptr<HloModule> debug_module = nullptr;
     bool enable_debug_info_manager = true;
   };
@@ -104,12 +121,16 @@ class GpuExecutable : public Executable {
   // This should be called after set_ir_module_string.
   const std::string& ir_module_string() const { return ir_module_string_; }
 
-  const std::string& module_name() const { return module_name_; }
+  absl::string_view name() const override { return module_name_; }
 
-  const xla::Shape& output_shape() const { return output_shape_; }
+  xla::Shape result_shape() const override { return program_shape_.result(); }
 
   const absl::flat_hash_map<ShapeIndex, OutputInfo>& output_info() const {
     return output_info_;
+  }
+
+  ComputationLayout compute_computation_layout() const override {
+    return ComputationLayout(program_shape_, /*ignore_layouts=*/false);
   }
 
   // This should be called before ExecuteOnStream.
@@ -172,6 +193,8 @@ class GpuExecutable : public Executable {
   const BufferAssignment* buffer_assignment() const {
     return buffer_assignment_.get();
   }
+
+  const GpuAliasInfo* alias_info() const { return alias_info_.get(); }
 
   const SequentialThunk& GetThunk() { return *thunks_; }
 
@@ -248,7 +271,7 @@ class GpuExecutable : public Executable {
 
   std::string module_name_;
 
-  xla::Shape output_shape_;
+  ProgramShape program_shape_;
 
   // The allocations_ object contains allocations that **may** be used to
   // provide information for allocating memory for every output/temp buffer.
@@ -260,7 +283,11 @@ class GpuExecutable : public Executable {
   // See the comment on GetAllocations().
   //
   // This object is also used for dumping debug info.
-  std::unique_ptr<const xla::BufferAssignment> buffer_assignment_;
+  std::shared_ptr<const xla::BufferAssignment> buffer_assignment_;
+
+  // Backend specific aliasing information whether operands can/should share the
+  // buffer with the user.
+  std::unique_ptr<GpuAliasInfo> alias_info_;
 
   ModuleAnnotations module_annotations_ = [this] {
     if (has_module()) {

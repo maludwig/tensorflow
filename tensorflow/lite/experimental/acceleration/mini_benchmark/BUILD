@@ -13,6 +13,9 @@
 # limitations under the License.
 # ==============================================================================
 
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:strict.default.bzl", "py_strict_binary")
 load("//tensorflow:tensorflow.bzl", "clean_dep")
 
@@ -294,8 +297,8 @@ cc_library(
     hdrs = ["decode_jpeg_register.h"],
     copts = tflite_copts(),
     deps = [
+        ":decode_jpeg_status",
         ":libjpeg_decoder",
-        "//tensorflow/lite:string",
         "//tensorflow/lite:string_util",
         "//tensorflow/lite/core/c:c_api_types",
         "//tensorflow/lite/core/c:common",

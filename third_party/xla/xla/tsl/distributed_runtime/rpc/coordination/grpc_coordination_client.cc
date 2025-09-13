@@ -49,8 +49,6 @@ using tensorflow::DeleteKeyValueRequest;
 using tensorflow::DeleteKeyValueResponse;
 using tensorflow::GetAliveTasksRequest;
 using tensorflow::GetAliveTasksResponse;
-using tensorflow::GetJobStateRequest;
-using tensorflow::GetJobStateResponse;
 using tensorflow::GetKeyValueDirRequest;
 using tensorflow::GetKeyValueDirResponse;
 using tensorflow::GetKeyValueRequest;
@@ -59,6 +57,8 @@ using tensorflow::GetTaskStateRequest;
 using tensorflow::GetTaskStateResponse;
 using tensorflow::HeartbeatRequest;
 using tensorflow::HeartbeatResponse;
+using tensorflow::IncrementKeyValueRequest;
+using tensorflow::IncrementKeyValueResponse;
 using tensorflow::InsertKeyValueRequest;
 using tensorflow::InsertKeyValueResponse;
 using tensorflow::PollForErrorRequest;
@@ -77,6 +77,8 @@ using tensorflow::TryGetKeyValueRequest;
 using tensorflow::TryGetKeyValueResponse;
 using tensorflow::WaitForAllTasksRequest;
 using tensorflow::WaitForAllTasksResponse;
+using tensorflow::WatchJobStateRequest;
+using tensorflow::WatchJobStateResponse;
 
 class GrpcCoordinationClientThread {
  public:
@@ -205,12 +207,13 @@ class GrpcCoordinationClient : public CoordinationClient {
         &target_);
   }
 
-  void GetJobStateAsync(const GetJobStateRequest* request,
-                        GetJobStateResponse* response,
-                        StatusCallback done) override {
+  void WatchJobStateAsync(CallOptions* call_opts,
+                          const WatchJobStateRequest* request,
+                          WatchJobStateResponse* response,
+                          StatusCallback done) override {
     new RPCState<protobuf::Message>(
-        &stub_, cq_, "/tensorflow.CoordinationService/GetJobState", *request,
-        response, std::move(done), /*call_opts=*/nullptr,
+        &stub_, cq_, "/tensorflow.CoordinationService/WatchJobState", *request,
+        response, std::move(done), call_opts,
         /*threadpool=*/nullptr, /*max_retries=*/0, /*fail_fast=*/true,
         &target_);
   }
@@ -242,6 +245,16 @@ class GrpcCoordinationClient : public CoordinationClient {
     new RPCState<protobuf::Message>(
         &stub_, cq_, "/tensorflow.CoordinationService/TryGetKeyValue", *request,
         response, std::move(done), /*call_opts=*/nullptr,
+        /*threadpool=*/nullptr, /*max_retries=*/0, /*fail_fast=*/true,
+        &target_);
+  }
+
+  void IncrementKeyValueAsync(const IncrementKeyValueRequest* request,
+                              IncrementKeyValueResponse* response,
+                              StatusCallback done) override {
+    new RPCState<protobuf::Message>(
+        &stub_, cq_, "/tensorflow.CoordinationService/IncrementKeyValue",
+        *request, response, std::move(done), /*call_opts=*/nullptr,
         /*threadpool=*/nullptr, /*max_retries=*/0, /*fail_fast=*/true,
         &target_);
   }

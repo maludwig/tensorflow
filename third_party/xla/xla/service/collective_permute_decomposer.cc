@@ -66,7 +66,9 @@ static bool ShouldDecompose(
   }
 
   // Respect threshold to limit this pass.
-  if (ShapeUtil::ByteSizeOf(result_shape) < threshold_in_bytes) {
+  if (pipeline_parallelism_opt_level ==
+          DebugOptions::PIPELINE_PARALLELISM_OPT_LEVEL_DISABLE &&
+      ShapeUtil::ByteSizeOf(result_shape) < threshold_in_bytes) {
     return false;
   }
 
@@ -186,10 +188,6 @@ static absl::StatusOr<DecomposedCp> DecomposeCollectivePermute(
       break;
     case DebugOptions::PIPELINE_PARALLELISM_OPT_LEVEL_ENABLE:
       TF_RETURN_IF_ERROR(recv_done->AddControlDependencyTo(send));
-      break;
-    case DebugOptions::PIPELINE_PARALLELISM_OPT_LEVEL_ENABLE_CYCLE_DECOMPOSER:
-      TF_RETURN_IF_ERROR(recv->AddControlDependencyTo(send));
-      TF_RETURN_IF_ERROR(recv_done->AddControlDependencyTo(send_done));
       break;
     default:
       return absl::InvalidArgumentError(

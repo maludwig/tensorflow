@@ -44,7 +44,8 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/translate/mhlo_to_hlo/mlir_hlo_to_hlo.h"
 #include "xla/hlo/translate/mhlo_to_hlo/type_to_shape.h"
-#include "xla/mlir_hlo/mhlo/IR/register.h"
+#include "xla/hlo/translate/register.h"
+#include "xla/mlir_hlo/utils/unregistered_attributes.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_proto_util.h"
@@ -52,8 +53,6 @@ limitations under the License.
 #include "xla/shape_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
-
-constexpr char kParameterReplicationAttr[] = "mhlo.parameter_replication";
 
 namespace xla {
 
@@ -127,17 +126,19 @@ absl::Status ConvertMlirHloToHloViaBuilder(
     computation.mutable_proto()->mutable_computations(0)->set_execution_thread(
         execution_thread.str());
   }
-  for (int i = 0; i < main.getNumArguments(); ++i)
+  for (int i = 0; i < main.getNumArguments(); ++i) {
     if (auto pr = main.getArgAttrOfType<mlir::ArrayAttr>(
-            i, kParameterReplicationAttr))
-      for (auto b : pr.getValue())
+            i, xla::kMhloParameterReplication)) {
+      for (auto b : pr.getValue()) {
         computation.mutable_proto()
             ->mutable_computations(0)
             ->mutable_instructions(i)
             ->mutable_parameter_replication()
             ->add_replicated_at_leaf_buffers(
                 mlir::cast<mlir::BoolAttr>(b).getValue());
-
+      }
+    }
+  }
   auto hlo_module = computation.proto();
   mlir::StringRef module_name = module.getName() ? *module.getName() : "main";
   hlo_module.set_name(module_name.str());
@@ -149,7 +150,8 @@ absl::Status ConvertMlirHloToHloViaBuilder(
 mlir::LogicalResult MlirHloToHloTextTranslateFunction(
     mlir::ModuleOp module, llvm::raw_ostream& output, bool emit_return_tuple,
     bool emit_use_tuple_arg, bool print_layouts, bool print_large_constants,
-    bool print_sugar, bool via_builder, bool with_layouts) {
+    bool print_sugar, bool via_builder, bool with_layouts,
+    bool direct_stablehlo_to_hlo) {
   if (!module) return mlir::failure();
 
   HloProto hloProto;
@@ -157,6 +159,7 @@ mlir::LogicalResult MlirHloToHloTextTranslateFunction(
   options.propagate_layouts = with_layouts;
   options.use_tuple_args = emit_use_tuple_arg;
   options.return_tuple = emit_return_tuple;
+  options.direct_stablehlo_to_hlo = direct_stablehlo_to_hlo;
   absl::StatusOr<std::unique_ptr<HloModule>> statusOrHloModule;
   if (via_builder) {
     auto status = ConvertMlirHloToHloViaBuilder(module, &hloProto, options);
@@ -206,8 +209,7 @@ mlir::LogicalResult MlirHloToHloTextMain(
   source_mgr->AddNewSourceBuffer(std::move(buffer), llvm::SMLoc());
 
   mlir::DialectRegistry registry;
-  mlir::mhlo::registerAllMhloDialects(registry);
-  registry.insert<mlir::func::FuncDialect>();
+  xla::RegisterMlirToHloDependentDialects(registry);
 
   mlir::MLIRContext context(registry);
   mlir::OwningOpRef<mlir::ModuleOp> module =

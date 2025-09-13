@@ -19,7 +19,6 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
-#include <memory>
 #include <vector>
 
 #include "absl/algorithm/container.h"
@@ -43,9 +42,9 @@ limitations under the License.
 #include "xla/service/instruction_fusion.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/status.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
@@ -63,30 +62,38 @@ const HloSliceInstruction* FindUniqueSlice(const HloInstruction* parent,
                                            const HloInstruction* instr) {
   if (const auto* slice = DynCast<HloSliceInstruction>(instr)) {
     return slice;
-  } else if (const auto* fusion = DynCast<HloFusionInstruction>(instr)) {
+  }
+  if (const auto* fusion = DynCast<HloFusionInstruction>(instr)) {
     const HloSliceInstruction* result = nullptr;
     for (size_t i = 0; i < fusion->operand_count(); ++i) {
       if (fusion->operand(i) == parent) {
         // Parameter used more than once -> there's no unique slice.
-        if (result) return nullptr;
+        if (result) {
+          return nullptr;
+        }
 
         auto* called_param = fusion->fused_parameter(i);
-        if (called_param->user_count() != 1) return nullptr;
+        if (called_param->user_count() != 1) {
+          return nullptr;
+        }
 
         result = FindUniqueSlice(called_param, called_param->users()[0]);
-        if (!result) return nullptr;
+        if (!result) {
+          return nullptr;
+        }
       }
     }
     return result;
-  } else {
-    return nullptr;
   }
+  return nullptr;
 }
 
 FusionDecision ParameterSlicesAreNonOverlapping(const HloInstruction& instr1,
                                                 const HloInstruction& instr2,
                                                 const HloInstruction* parent) {
-  if (parent->shape().IsTuple()) return FusionDecision::Allow();
+  if (parent->shape().IsTuple()) {
+    return FusionDecision::Allow();
+  }
   // Allow MOF if the parameter is small, even if there's no overlap. 1024 bytes
   // were arbitrarily chosen as the threshold.
   if (ShapeUtil::ByteSizeOfElements(parent->shape()) < 1024) {
@@ -95,7 +102,9 @@ FusionDecision ParameterSlicesAreNonOverlapping(const HloInstruction& instr1,
 
   const HloSliceInstruction* slice1 = FindUniqueSlice(parent, &instr1);
   const HloSliceInstruction* slice2 = FindUniqueSlice(parent, &instr2);
-  if (!slice1 || !slice2) return FusionDecision::Allow();
+  if (!slice1 || !slice2) {
+    return FusionDecision::Allow();
+  }
 
   // TODO(jreiffers): Check strides as well.
   auto& starts1 = slice1->slice_starts();
@@ -103,7 +112,7 @@ FusionDecision ParameterSlicesAreNonOverlapping(const HloInstruction& instr1,
   auto& limits1 = slice1->slice_limits();
   auto& limits2 = slice2->slice_limits();
 
-  for (int64_t dim = 0; dim < parent->shape().rank(); ++dim) {
+  for (int64_t dim = 0; dim < parent->shape().dimensions().size(); ++dim) {
     bool overlap = starts1[dim] < limits2[dim] && starts2[dim] < limits1[dim];
     if (!overlap) {
       return FusionDecision::Forbid("slices are non-overlapping");
@@ -188,6 +197,7 @@ FusionDecision ProducerCandidateIsFusible(
     const HloInstruction& producer, const HloInstruction& consumer,
     const HloDfsReachability& reachability, FusionInfoCache* fusion_info_cache,
     const se::DeviceDescription& device_info,
+    GpuPerformanceModelOwning& gpu_performance_model,
     GpuHloCostAnalysis* cost_analysis) {
   if (!IsFusibleAsMultiOutputFusionRoot(consumer, device_info)) {
     return FusionDecision::Forbid(
@@ -209,8 +219,8 @@ FusionDecision ProducerCandidateIsFusible(
   }
 
   GpuPerformanceModel::RunTimes t =
-      GpuPerformanceModel::EstimateRunTimesForMultiOutputFusion(
-          &producer, &consumer, device_info, cost_analysis);
+      gpu_performance_model.Get().EstimateRunTimesForMultiOutputFusion(
+          &producer, &consumer, cost_analysis);
   if (t.time_fused > t.time_unfused) {
     return FusionDecision::Forbid("will execute slower if fused");
   }
@@ -222,6 +232,7 @@ std::vector<HloInstruction*> GetProducerConsumerMultiOutputFusionCandidates(
     const HloInstruction* producer, const HloDfsReachability& reachability,
     FusionInfoCache* fusion_info_cache,
     const se::DeviceDescription& device_info,
+    GpuPerformanceModelOwning& gpu_performance_model,
     GpuHloCostAnalysis* cost_analysis) {
   std::vector<HloInstruction*> fusion_candidates;
   const HloComputation* computation = producer->parent();
@@ -249,7 +260,7 @@ std::vector<HloInstruction*> GetProducerConsumerMultiOutputFusionCandidates(
 
     if (auto decision = ProducerCandidateIsFusible(
             *producer, *consumer, reachability, fusion_info_cache, device_info,
-            cost_analysis)) {
+            gpu_performance_model, cost_analysis)) {
       fusion_candidates.push_back(consumer);
     } else if (dump_fusion) {
       RegisterFusionState(
@@ -420,6 +431,7 @@ absl::StatusOr<bool> MultiOutputFusion::DoMultiOutputFusion() {
       computation_->MakeInstructionPostOrder();
 
   FusionInfoCache fusion_info_cache(device_info_);
+  GpuPerformanceModelOwning gpu_performance_model(device_info_);
   // Traverse the HLO in uses-before-defs order.
   for (auto it = defs_before_uses.rbegin(); it != defs_before_uses.rend();
        ++it) {
@@ -443,7 +455,7 @@ absl::StatusOr<bool> MultiOutputFusion::DoMultiOutputFusion() {
     // traversal, and hence, not get into the way of subsequent fusion attempts.
     const auto candidates = GetProducerConsumerMultiOutputFusionCandidates(
         producer, *reachability_, &fusion_info_cache, device_info_,
-        &cost_analysis);
+        gpu_performance_model, &cost_analysis);
     auto* consumer_for_fusion = SelectPreferredFusionCandidate(candidates);
     if (consumer_for_fusion == nullptr) {
       continue;

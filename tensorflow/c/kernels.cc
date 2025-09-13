@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/c/c_api_internal.h"
 #include "tensorflow/c/c_api_macros.h"
@@ -50,7 +51,6 @@ limitations under the License.
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/platform/notification.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 
 // Required for IS_MOBILE_PLATFORM definition
@@ -246,7 +246,7 @@ class CAsyncOpKernel : public AsyncOpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    Notification n;
+    absl::Notification n;
     ComputeAsync(ctx, [&n]() { n.Notify(); });
     n.WaitForNotification();
   }
@@ -875,8 +875,8 @@ TF_Tensor* TF_ForwardInputOrAllocateOutput(
   TF_SetStatus(status, TF_OK, "");
   auto* cc_ctx = reinterpret_cast<::tensorflow::OpKernelContext*>(context);
 
-  tensorflow::gtl::ArraySlice<int> input_indices_array(
-      candidate_input_indices, num_candidate_input_indices);
+  absl::Span<const int> input_indices_array(candidate_input_indices,
+                                            num_candidate_input_indices);
   tensorflow::gtl::ArraySlice<const int64_t> output_dimarray(
       reinterpret_cast<const int64_t*>(output_dims), output_num_dims);
   tensorflow::Tensor* output_tensor_pointer;

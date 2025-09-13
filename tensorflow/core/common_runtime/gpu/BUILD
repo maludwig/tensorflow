@@ -1,5 +1,7 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
-load("@local_xla//xla/tsl:tsl.bzl", "if_cuda_libs")
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
+load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm")
+load("@local_xla//xla/tsl:tsl.default.bzl", "if_cuda_libs")
 load(
     "//tensorflow:tensorflow.bzl",
     "clean_dep",
@@ -201,6 +203,8 @@ tf_cuda_library(
         "//tensorflow/core/profiler/lib:scoped_memory_debug_annotation",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@local_xla//xla:shape_util",
         "@local_xla//xla/stream_executor/gpu:gpu_init_impl",
         "@local_xla//xla/stream_executor/integrations:stream_executor_allocator",
         "@local_xla//xla/tsl/framework:device_id_utils",
@@ -214,7 +218,6 @@ tf_cuda_library(
             clean_dep("//tensorflow:linux_x86_64_with_weightwatcher"): [],
             (
                 clean_dep("//tensorflow:linux_x86_64"),
-                clean_dep("//tensorflow:haswell"),
             ): [
                 "//tensorflow/compiler/tf2xla:layout_util",
                 "//tensorflow/compiler/jit:flags",
@@ -230,6 +233,10 @@ tf_cuda_library(
         ]),
     ) + if_cuda_or_rocm([
         "@local_tsl//tsl/platform:dso_loader",
+    ]) + if_cuda([
+        "@local_xla//xla/stream_executor/cuda:all_runtime",
+    ]) + if_rocm([
+        "@local_xla//xla/stream_executor/rocm:all_runtime",
     ]),
     alwayslink = 1,
 )
@@ -341,8 +348,8 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@com_google_absl//absl/synchronization",
         "@local_xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
-        "@local_xla//xla/tests:test_macros_header",
         "@local_xla//xla/tsl/framework:device_id",
     ],
 )
@@ -404,8 +411,8 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@com_google_absl//absl/synchronization",
         "@local_xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
-        "@local_xla//xla/tests:test_macros_header",
     ],
 )
 
@@ -423,6 +430,7 @@ tf_cuda_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 

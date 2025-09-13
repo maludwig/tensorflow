@@ -39,9 +39,9 @@
 #include "xla/python/ifrt_proxy/common/prof_util.h"
 #include "xla/python/ifrt_proxy/common/test_utils.h"
 #include "xla/python/ifrt_proxy/common/types.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/status_to_from_proto.h"
-#include "tsl/platform/threadpool.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/status_to_from_proto.h"
+#include "xla/tsl/platform/threadpool.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
@@ -132,6 +132,7 @@ class RpcHelper::Batcher {
 
   // Asks the underlying transport to terminate.
   void Finish(absl::Status s) {
+    LOG(INFO) << "RpcHelper::Batcher::Finish() starting: " << s;
     {
       absl::MutexLock l(&mu_);
       finished_ = true;
@@ -145,8 +146,11 @@ class RpcHelper::Batcher {
                         "still batched destruct operations";
       }
     }
+    LOG(INFO) << "RpcHelper::Batcher::Finish(): resetting thread_pool_.";
     thread_pool_.reset();
+    LOG(INFO) << "RpcHelper::Batcher::Finish(): calling session_->Finish().";
     session_->Finish(s);
+    LOG(INFO) << "RpcHelper::Batcher::Finish(): done.";
   }
 
  private:
@@ -247,8 +251,9 @@ Future<std::shared_ptr<Resp>> DoRpc(RpcHelper::Batcher* batcher,
   XFlowHelper x_flow_helper(profiling_name);
   auto traceme = x_flow_helper.Span<XFlowHelper::kSend>();
 
-  auto promise = Future<std::shared_ptr<Resp>>::CreatePromise();
-  auto on_ready = [promise, has_resp, get_resp, profiling_name, x_flow_helper](
+  auto [promise, future] = Future<std::shared_ptr<Resp>>::MakePromise();
+  auto on_ready = [promise = std::move(promise), has_resp, get_resp,
+                   profiling_name, x_flow_helper](
                       absl::StatusOr<std::shared_ptr<IfrtResponse>> r) mutable {
     if (!r.ok()) {
       VLOG(3) << profiling_name << " response: " << r.status();
@@ -303,9 +308,9 @@ Future<std::shared_ptr<Resp>> DoRpc(RpcHelper::Batcher* batcher,
     promise.Set(std::move(result));
   };
   VLOG(3) << ifrt_req->ShortDebugString();
-  batcher->Immediate(std::move(ifrt_req)).OnReady(on_ready);
+  batcher->Immediate(std::move(ifrt_req)).OnReady(std::move(on_ready));
 
-  return Future<std::shared_ptr<Resp>>(promise);
+  return std::move(future);
 }
 
 #define RPC(METHOD, PROPERTY)                                                 \
@@ -322,6 +327,8 @@ RPC(GetDefaultDeviceAssignment, get_default_device_assignment);
 RPC(CheckFuture, check_future);
 RPC(CheckValueReady, check_value_ready);
 RPC(MakeArrayFromHostBuffer, make_array_from_host_buffer);
+RPC(MakeArraysFromHostBufferShards, make_arrays_from_host_buffer_shards);
+RPC(MakeErrorArrays, make_error_arrays);
 RPC(AssembleArrayFromSingleDeviceArrays,
     assemble_array_from_single_device_arrays);
 RPC(RemapArrays, remap_arrays);
@@ -340,18 +347,19 @@ RPC(LoadedExecutableIsDeleted, loaded_executable_is_deleted);
 RPC(LoadedExecutableDestruct, loaded_executable_destruct);
 RPC(LoadedHostCallbackPoll, loaded_host_callback_poll);
 RPC(LoadedHostCallbackReturn, loaded_host_callback_return);
+RPC(GetDefaultLayout, get_default_layout);
 
 Future<> RpcHelper::CheckFuture(uint64_t handle) {
   auto req = std::make_unique<CheckFutureRequest>();
   req->set_future_handle(handle);
 
-  auto promise = Future<>::CreatePromise();
+  auto [promise, future] = Future<>::MakePromise();
   CheckFuture(std::move(req))
-      .OnReady(
-          [promise](absl::StatusOr<std::shared_ptr<CheckFutureResponse>>
-                        response) mutable { promise.Set(response.status()); });
+      .OnReady([promise = std::move(promise)](
+                   absl::StatusOr<std::shared_ptr<CheckFutureResponse>>
+                       response) mutable { promise.Set(response.status()); });
 
-  return Future<>(std::move(promise));
+  return std::move(future);
 }
 
 RpcHelper::RpcHelper(IfrtProxyVersion version,
@@ -359,14 +367,19 @@ RpcHelper::RpcHelper(IfrtProxyVersion version,
     : batcher_(std::make_unique<Batcher>(std::move(session))),
       version_(std::move(version)) {}
 
-RpcHelper::~RpcHelper() { Disconnect(); }
+RpcHelper::~RpcHelper() {
+  LOG(INFO) << "RpcHelper::~RpcHelper() starting.";
+  Disconnect();
+  LOG(INFO) << "RpcHelper::~RpcHelper() done.";
+}
 
 void RpcHelper::Batch(BatchOperation op, ArrayHandle handle) {
   return batcher_->Batch(op, handle);
 }
 
 void RpcHelper::Disconnect() {
-  batcher_->Finish(absl::CancelledError("Disconnected by client"));
+  batcher_->Finish(absl::CancelledError(
+      "Disconnected by client [via RpcHelper::Disconnect()]"));
 }
 
 uint64_t RpcHelper::NextHandle() {
